@@ -12,18 +12,18 @@
 
 目前验证的 DSH 版本为 **`0.2.2-rc.1`**。请先在 DSH 的模型设置中准备一个可用的对话模型。使用外部渠道的记忆和分享功能时，还需要系统可调用的 Python 3。QQ 表情缩略图需要 [Pillow](https://pillow.readthedocs.io/)。
 
-在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.23`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
+在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.24`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
 
-Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.23)
+Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.24)
 
 ```sh
-dsh plugin --profile web add maomao-dsh-panel@0.2.23
+dsh plugin --profile web add maomao-dsh-panel@0.2.24
 ```
 
 也可以从 GitHub 安装同一个版本。
 
 ```sh
-dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.23'
+dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.24'
 ```
 
 重启后打开「设置 → 猫猫 → 开始使用」。只在 DSH 聊天的话，直接在新会话的模式菜单选「猫猫」，发一句「猫猫你好」。

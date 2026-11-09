@@ -7,7 +7,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { ApiError } from '@tencent-connect/qqbot-nodejs';
 
 import { finalAssistantText, HarnessConversation } from '../harness.mjs';
-import { allowedInbound, normalizeInbound, textBubbles } from '../inbound.mjs';
+import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, textBubbles } from '../inbound.mjs';
 import { loadQqImage, qqMediaUrl } from '../media.mjs';
 import { apply, MaomaoQqConnector } from '../index.mjs';
 import { ConnectorState } from '../state.mjs';
@@ -91,6 +91,100 @@ test('normalizes immutable per-message identity and observes unmentioned media',
   assert.equal(otherMention.text, '<@other> 你好');
   assert.notEqual(normalizeInbound(rawMessage(), 100, 'app-a').receiptKey,
     normalizeInbound(rawMessage(), 100, 'app-b').receiptKey);
+});
+
+test('resolves only the quoted QQ message and keeps its media separate from direct uploads', () => {
+  const quoted = { msg_idx: '100', attachments: [{ content_type: 'image/jpeg', url: '//img.qpic.cn/quoted' }] };
+  const other = { msg_idx: '101', attachments: [{ content_type: 'image/png', url: '//img.qpic.cn/other' }] };
+  const input = { attachments: [], refMsgIdx: '100', raw: { message_type: 103, msg_elements: [other, quoted] } };
+  const envelope = normalizeInbound(rawMessage(input));
+  assert.deepEqual(envelope.attachments, []);
+  assert.equal(inboundImage(envelope).sourceUrl, quoted.attachments[0].url);
+  assert.ok(Object.isFrozen(envelope.quotedImages));
+  assert.equal(inboundImage(normalizeInbound(rawMessage({ ...input, refMsgIdx: '102' }))), undefined);
+  assert.equal(inboundImage(normalizeInbound(rawMessage({ ...input, msgType: 0 }))), undefined);
+  const withDirect = normalizeInbound(rawMessage({ ...input, attachments: other.attachments }));
+  assert.equal(inboundImage(withDirect), withDirect.attachments[0]);
+});
+
+test('split QQ image pairing is short-lived and scoped to the same sender, group and bot', () => {
+  const at = normalizeInbound(rawMessage({ messageId: 'at', rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    content: '帮我看看', attachments: [] }), 10_000, 'test-app');
+  const photo = normalizeInbound(rawMessage({ messageId: 'photo', content: '' }), 10_500, 'test-app');
+  assert.equal(recentImageFor(at, [photo]), photo);
+  for (const changes of [{ senderId: 'other' }, { chatId: 'other' }, { botId: 'other' },
+    { addressed: true }, { addressedToOther: true }, { receivedAt: 10_751 }, { receivedAt: 6_999 }]) {
+    assert.equal(recentImageFor(at, [{ ...photo, ...changes }]), null);
+  }
+});
+
+test('QQ downloads native quoted and split images and delivers the recognition to the addressed turn', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'maomao-qq-inbound-images-'));
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const downloads = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    downloads.push([url, options.headers.Authorization]);
+    return new Response(png);
+  });
+  const asks = [];
+  const claims = [];
+  const inspected = [];
+  let finish;
+  const bot = {
+    api: { async getToken() { return 'fake-token'; } },
+    use() {}, on() {}, start() { return new Promise((resolve) => { finish = resolve; }); },
+    stop() { finish(); }, async send() { return { id: 'sent' }; },
+  };
+  const models = {
+    mediaChoice: (kind) => kind === 'vision' ? { enabled: true } : null,
+    async mediaAdapter() {
+      return { async inspect(image) { inspected.push(image); return `识图结果 ${image.name}`; } };
+    },
+  };
+  const connector = new MaomaoQqConnector(
+    { sessionController: {}, emit() {}, logger: {}, get: (key) => key === 'maomaoModels' ? models : undefined },
+    { groupAllowlist: ['group-one'], statePath: join(directory, 'state.json') },
+    { managedCredential: { appId: 'test-app', secret: 'test-secret' }, botFactory: () => bot,
+      ordinary: { async media(op, envelope) { claims.push([op, envelope.messageId, envelope.attachments[0]?.kind]);
+        return { allowed: true }; }, async stop() {} },
+      harness: { async ask(envelope, options) { asks.push([envelope.messageId, options]); return '看到了'; } } },
+  );
+  const image = (name) => ({ content_type: 'image/png', url: `//img.qpic.cn/${name}`, filename: name });
+  const at = (messageId, content = '', extra = {}) => rawMessage({ messageId, rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    attachments: [], content, ...extra });
+  const photo = (messageId) => rawMessage({ messageId, content: '', attachments: [image(messageId)] });
+  const untilAsked = async (count) => {
+    for (let i = 0; i < 250 && asks.length < count; i++) await pause(10);
+    assert.equal(asks.length, count);
+  };
+  try {
+    await connector.start();
+    await connector.accept(at('quote', '这是什么？', {
+      msgType: 103, refMsgIdx: '100', msgElements: [{ msg_idx: '100', attachments: [image('quoted')] }],
+    }));
+    await untilAsked(1);
+    await connector.accept(photo('photo-before'));
+    await connector.accept(at('at-after', '看一下'));
+    await untilAsked(2);
+    await connector.accept(at('at-before'));
+    await connector.accept(photo('photo-after'));
+    await untilAsked(3);
+    await connector.accept(at('direct', '', { attachments: [image('direct')] }));
+    await untilAsked(4);
+    assert.deepEqual(asks.map(([id, options]) => [id, options.imageDescription, options.referencedImage]), [
+      ['quote', '识图结果 quoted', { quoted: true }],
+      ['at-after', '识图结果 photo-before', { sameSender: true }],
+      ['at-before', '识图结果 photo-after', { sameSender: true }],
+      ['direct', '识图结果 direct', null],
+    ]);
+    assert.deepEqual(claims, ['quote', 'photo-before', 'photo-after', 'direct'].map((id) => ['vision_claim', id, 'image']));
+    assert.deepEqual(inspected.map(({ data }) => data), Array(4).fill(png.toString('base64')));
+    assert.deepEqual(downloads, ['quoted', 'photo-before', 'photo-after', 'direct']
+      .map((name) => [`https://img.qpic.cn/${name}`, 'QQBot fake-token']));
+  } finally {
+    await connector.stop();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('panel pairing admits exactly the verified QQ scope without emitting the pairing message', async (t) => {
@@ -374,6 +468,11 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
     assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
       /用户要求“一句”时严格只回一句/);
     assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text, /当前发言者已在本 QQ 会话验证为主人/);
+    const quote = { ...envelope, messageId: 'message-quote', text: '', attachments: [] };
+    assert.equal(await bridge.ask(quote, { referencedImage: { quoted: true }, imageDescription: '一只翠鸟' }), '喵～');
+    assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
+      /图片来自用户在 QQ 引用的消息。[\s\S]*识别摘要[\s\S]*一只翠鸟/);
+    assert.equal(await bridge.ask(quote, { referencedImage: { quoted: true } }), '这张图片我暂时没读取到，能再发一次吗？');
     assert.equal(finalAssistantText([{ event: { type: 'assistant/message', data: { message: { content: [{ type: 'tool-call' }] } } } }]), '');
   } finally {
     await rm(directory, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { setTimeout as wait } from 'node:timers/promises';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
 
 import { HarnessConversation } from './harness.mjs';
@@ -8,7 +9,8 @@ import { HarnessShadowJudge } from './judge.mjs';
 import { qqCommand, qqPersonaReply, sidReply, statusReply } from './commands.mjs';
 import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
 import { GeminiImageGeneration, OpenAiImageGeneration, QqImageTool, imageRequest } from './image-generation.mjs';
-import { allowedInbound, normalizeInbound, recentImageFor, textBubbles } from './inbound.mjs';
+import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, SPLIT_IMAGE_WAIT_MS,
+  textBubbles, waitsForSplitImage } from './inbound.mjs';
 import { plainQqMarkdown } from './markdown.mjs';
 import { loadQqImage } from './media.mjs';
 import { OrdinaryBridge } from './ordinary.mjs';
@@ -387,7 +389,9 @@ export class MaomaoQqConnector {
     const priorImage = recentImageFor(envelope, this.#observed.values());
     const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
     const allowJudgment = !Array.isArray(judgeGroups) || judgeGroups.includes(envelope.chatId);
-    const shadowDecision = this.#shadow?.observe(envelope, { hasReferencedImage: Boolean(priorImage), peer, allowJudgment }) ?? null;
+    const shadowDecision = this.#shadow?.observe(envelope, {
+      hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment,
+    }) ?? null;
     if (shadowDecision) void shadowDecision.catch((error) =>
       this.#logger.warn?.('QQ shadow unavailable:', errorLabel(error)));
     let ordinaryContext = null;
@@ -400,7 +404,8 @@ export class MaomaoQqConnector {
       catch (error) { this.#logger.warn?.('QQ ordinary memory unavailable:', errorLabel(error)); }
     }
     if (envelope.addressed && this.#config.respondToMentions !== false
-      && (envelope.text || priorImage || envelope.attachments.some((item) => item.kind === 'image' || item.asrText))) {
+      && (envelope.text || priorImage || inboundImage(envelope) || waitsForSplitImage(envelope)
+        || envelope.attachments.some((item) => item.asrText))) {
       this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
     } else if (shadowDecision && passiveGroup && this.#config.shadow?.semantic?.enabled === true) {
       void shadowDecision.then((row) => {
@@ -468,15 +473,27 @@ export class MaomaoQqConnector {
       const current = () => !this.#stopped && this.#allowed(envelope) && profile.current()
         && (!passive || this.#shadow?.isLatest(envelope) === true);
       if (!current()) return;
-      const source = priorImage ?? envelope;
+      let linkedImage = priorImage;
+      if (!test && waitsForSplitImage(envelope)) {
+        const remaining = envelope.receivedAt + SPLIT_IMAGE_WAIT_MS - Date.now();
+        if (remaining > 0) await wait(remaining, undefined, { signal: this.#abort.signal }).catch(() => {});
+        if (!current()) return;
+        linkedImage = recentImageFor(envelope, this.#observed.values());
+      }
+      const source = linkedImage ?? envelope;
+      const attachment = inboundImage(source);
+      const quoted = attachment && source.quotedImages?.includes(attachment);
+      const visionSource = quoted ? { ...source, attachments: [attachment] } : source;
       const models = this.#ctx.get?.('maomaoModels');
+      const visionChoice = models?.mediaChoice?.('vision');
       const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(120_000)]);
       let images = test ? [] : await this.loadImages(source.receiptKey);
       let imageDescription = this.#imageDetails.get(source.receiptKey);
       // The standard Gemini image route has no GIF input. With enrichment enabled, use the same JPEG preview.
-      if (images[0]?.mediaType === 'image/gif' && this.#ordinary) {
+      if (images[0]?.mediaType === 'image/gif' && (this.#ordinary || visionChoice?.enabled)) {
+        this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
         try {
-          const { jpeg } = await this.#ordinary.media('image_preview', source, { data: images[0].data });
+          const { jpeg } = await this.#ordinary.media('image_preview', visionSource, { data: images[0].data });
           images = jpeg ? [{ ...images[0], data: jpeg, mediaType: 'image/jpeg', name: 'qq-sticker.jpg' }] : [];
         } catch (error) {
           images = [];
@@ -485,12 +502,11 @@ export class MaomaoQqConnector {
       }
       if (!current()) return;
       const reference = images[0];
-      const visionChoice = models?.mediaChoice?.('vision');
       if (visionChoice && reference) {
         if (visionChoice.enabled) {
           this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
           imageDescription = await models.mediaAdapter('vision').then(async (adapter) => {
-            if (!adapter || !(await this.#ordinary.media('vision_claim', source)).allowed) return '';
+            if (!adapter || !(await this.#ordinary.media('vision_claim', visionSource)).allowed) return '';
             return adapter.inspect(reference, envelope.text, signal);
           }).catch(() => '') || imageDescription;
         } else imageDescription = null;
@@ -502,13 +518,14 @@ export class MaomaoQqConnector {
       if (!current()) return;
       const generation = !choiceProfile && this.#imageTool && !voice && envelope.addressed && imageRequest(envelope.text)
         ? models?.mediaChoice?.('image') ? await models.mediaAdapter('image').catch(() => null) : this.#imageGeneration : null;
-      const imageTool = generation ? this.#openImageTool(envelope, source, reference, current, generation) : null;
+      const imageTool = generation ? this.#openImageTool(envelope, source, quoted ? null : reference, current, generation) : null;
       const choices = !test && envelope.scope === 'group' && !passive && !voice && !imageTool
         && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group');
       const reply = await this.#harness.ask(envelope, {
         images,
         imageDescription,
-        referencedImage: priorImage ? { sameSender: priorImage.senderId === envelope.senderId } : null,
+        referencedImage: linkedImage ? { sameSender: linkedImage.senderId === envelope.senderId }
+          : quoted ? { quoted: true } : null,
         ambient: this.#shadow?.contextFor(envelope, profile.changedAt) ?? [],
         ordinaryContext,
         profile,
@@ -754,7 +771,7 @@ export class MaomaoQqConnector {
   async loadImages(receiptKey) {
     const envelope = this.#observed.get(receiptKey);
     if (!envelope || Date.now() - envelope.receivedAt > 10 * 60_000) return [];
-    const attachment = envelope.attachments.find((item) => item.kind === 'image');
+    const attachment = inboundImage(envelope);
     if (!attachment || !this.#bot) return [];
     if (!this.#imageInFlight.has(receiptKey)) {
       const operation = loadQqImage(attachment, {
