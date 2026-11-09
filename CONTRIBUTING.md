@@ -33,7 +33,11 @@ dsh web --host 127.0.0.1
 
 1. 更新 `package.json`、锁文件和 README 的版本。如果支持了新的 DSH 版本，实际安装验证后再改 `engines.dsh`。
 2. 运行测试和打包，检查归档内容，再用空白 DSH profile 安装。
-3. 为提交创建与包版本一致的 `vX.Y.Z` 标签，把 `npm run pack:release` 生成的 tgz 上传到 GitHub Release。
-4. 在 GitHub 仓库添加 `dsh-plugin` 主题。在 Settings → General → Social preview 上传 `assets/github-og.png`。更新后用仓库页面和实际安装链接验证。
+3. 将版本提交合入 `main`，再推送与包版本一致的 `vX.Y.Z` 标签。`Stage npm release` 会重新测试和打包，通过 GitHub Actions OIDC 将安装包提交到 npm 待发布队列。维护者在 npm 审核并完成二次验证后，用户才能安装这个版本。手动运行该工作流只会测试和打包。
+4. 从该工作流下载 `maomao-npm-tarball`，将同一份 tgz 上传到 GitHub Release。
+
+npm 上的 Trusted Publisher 对应仓库 `ififi2017/dsh-plugin-maomao` 和工作流 `npm-release.yml`，授权范围为暂存发布。发布任务使用 GitHub 托管运行器和短期 OIDC 凭据。[npm Trusted Publisher 文档](https://docs.npmjs.com/trusted-publishers/)
+
+GitHub 仓库使用 `dsh-plugin` 主题。需要更新分享图时，在 Settings → General → Social preview 上传 `assets/github-og.png`，再检查仓库页面和安装链接。
 
 供 GitHub 发现的 bundle 位于仓库根目录。源码已经是可运行的 JavaScript，仓库安装无需运行 prepare。参见 [DSH 官方仓库说明](https://github.com/deepseek-ai/deepseek-harness#community-and-support)和[bundle 发布指南](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)。

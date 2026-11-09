@@ -1,0 +1,62 @@
+name: Stage npm release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check release tag
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$GITHUB_REF_NAME" == "v$version" ]]
+          git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install Pillow
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run pack:release -- --pack-destination "$RUNNER_TEMP"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: maomao-npm-tarball
+          path: ${{ runner.temp }}/maomao-dsh-panel-*.tgz
+          if-no-files-found: error
+
+  stage:
+    if: github.repository == 'ififi2017/dsh-plugin-maomao' && github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - run: npm install --global --ignore-scripts npm@11.21.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: maomao-npm-tarball
+          path: ${{ runner.temp }}
+      - name: Submit package to npm for approval
+        run: npm stage publish "$RUNNER_TEMP"/maomao-dsh-panel-*.tgz --access public --tag latest --ignore-scripts
