@@ -1,0 +1,96 @@
+{
+  "name": "maomao-dsh-panel",
+  "version": "0.2.23",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./models": "./model-config.mjs",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json",
+    "./private": "./integrations/maomao-dsh/private-connector/index.mjs",
+    "./private/ordinary-policy": "./integrations/maomao-dsh/private-connector/ordinary-policy.mjs",
+    "./private/desktop-memory": "./integrations/maomao-dsh/private-connector/desktop-memory.mjs",
+    "./qq": "./integrations/maomao-dsh/qq-connector/index.mjs",
+    "./qq/ordinary-policy": "./integrations/maomao-dsh/qq-connector/ordinary-policy.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "channel-setup.mjs",
+    "model-config.mjs",
+    "model-media.mjs",
+    "memory-settings.mjs",
+    "memory-view.mjs",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "locale",
+    "icon.svg",
+    "LICENSES",
+    "assets/readme-banner.png",
+    "integrations/maomao-dsh/*.mjs",
+    "integrations/maomao-dsh/private-connector/*.mjs",
+    "integrations/maomao-dsh/private-connector/*.py",
+    "integrations/maomao-dsh/qq-connector/*.mjs",
+    "integrations/maomao-dsh/qq-connector/*.py",
+    "integrations/maomao-companion/persona.md",
+    "integrations/maomao-companion/maomao_companion/*.py"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "external": [
+        "react"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=24.9",
+    "dsh": "0.2.2-rc.1"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-typert-protocol": "0.2.2-rc.1",
+    "qrcode": "1.5.4",
+    "@larksuiteoapi/node-sdk": "1.76.0",
+    "qrcode-terminal": "0.12.0",
+    "@tencent-connect/qqbot-connector": "1.2.0",
+    "@tencent-connect/qqbot-nodejs": "1.0.4",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "bundleDependencies": [
+    "@larksuiteoapi/node-sdk"
+  ],
+  "description": "猫猫是适用于 DeepSeek Harness 的聊天伙伴插件，支持桌面、QQ、Telegram 和 Lark / 飞书。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ififi2017/dsh-plugin-maomao.git"
+  },
+  "homepage": "https://github.com/ififi2017/dsh-plugin-maomao#readme",
+  "bugs": {
+    "url": "https://github.com/ififi2017/dsh-plugin-maomao/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "maomao"
+  ],
+  "author": "fi_niaR",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs integrations/maomao-dsh/private-connector/tests/*.test.mjs integrations/maomao-dsh/qq-connector/tests/*.test.mjs",
+    "pack:release": "npm pack --ignore-scripts"
+  }
+}

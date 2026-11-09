@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-Hans">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>猫猫 · Maomao for DSH</title>
+<script>
+  document.documentElement.dataset.format = new URLSearchParams(location.search).get('format') === 'og' ? 'og' : 'readme';
+</script>
+<style>
+  * { box-sizing: border-box; }
+  html { --width: 1600px; --copy-x: 119px; --copy-y: 108px; --title: 110px; --art-x: 878px; --art-y: 19px; --halo-x: 927px; }
+  html[data-format=og] { --width: 1280px; --copy-x: 94px; --copy-y: 115px; --title: 101px; --art-x: 660px; --art-y: 25px; --halo-x: 701px; }
+  body { margin: 0; width: var(--width); height: 640px; overflow: hidden; font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif; color: #302044; }
+  main { width: 100%; height: 100%; position: relative; isolation: isolate; overflow: hidden; background: radial-gradient(ellipse at 77% 34%, #f6eaff 0, transparent 51%), linear-gradient(108deg, #fffaf1 8%, #f9f2ff 52%, #e2d3ff 100%); }
+  main::before { content: ""; position: absolute; inset: 23px; border: 1.5px solid #6950932c; border-radius: 24px; }
+  .orbit { position: absolute; top: 72px; left: var(--halo-x); width: 470px; height: 470px; border: 1px dashed #9b78c073; border-radius: 50%; }
+  .orbit::before { content: ""; position: absolute; inset: 26px; border: 1px solid #fff; border-radius: 50%; background: radial-gradient(circle at 38% 34%, #fff9f1 0, #e8d5fa 78%); }
+  .orbit::after { content: ""; position: absolute; left: 36px; bottom: 60px; height: 11px; width: 11px; border-radius: 50%; background: #b893e2; box-shadow: 396px -207px 0 1px #f8bdcf, 360px 10px 0 -1px #ba99de; }
+  .dots { position: absolute; inset: 32px 32px 32px 55%; opacity: .5; background: radial-gradient(circle, #ae90cd 1.1px, transparent 1.4px) 0 0 / 17px 17px; mask-image: linear-gradient(110deg, transparent, #000 80%); }
+  .art { position: absolute; width: 465px; height: 601px; left: var(--art-x); top: var(--art-y); object-fit: contain; filter: drop-shadow(0 12px 10px #684a8422); }
+  .spark { position: absolute; z-index: 1; color: #9464c0; font: 36px Georgia, serif; }
+  .spark.one { top: 140px; left: calc(var(--halo-x) + 5px); }
+  .spark.two { top: 384px; left: calc(var(--halo-x) + 432px); font-size: 45px; color: #aa72b8; }
+  .copy { position: absolute; z-index: 2; left: var(--copy-x); top: var(--copy-y); }
+  .eyebrow { display: flex; align-items: center; gap: 13px; color: #614285; font: 750 17px/1.25 ui-monospace, Menlo, monospace; letter-spacing: .18em; }
+  .eyebrow span { display: inline-block; width: 27px; height: 3px; border-radius: 9px; background: #a67bd3; }
+  h1 { margin: 29px 0 10px; font-size: var(--title); line-height: 1.07; letter-spacing: .025em; font-weight: 850; }
+  .tagline { margin: 24px 0 0; font-weight: 650; font-size: 33px; letter-spacing: -.025em; }
+  .channels { display: flex; gap: 9px; padding: 0; list-style: none; margin: 40px 0 0; }
+  .channels li { padding: 9px 14px; border: 1px solid #baa2d7; border-radius: 999px; color: #503467; background: #fff9; font-size: 17px; font-weight: 550; }
+  .mark { position: absolute; right: 55px; bottom: 39px; font: 700 12px ui-monospace, monospace; letter-spacing: .12em; color: #73578d; }
+</style>
+<main>
+  <div class="dots" aria-hidden="true"></div>
+  <div class="orbit" aria-hidden="true"></div>
+  <span class="spark one" aria-hidden="true">✦</span>
+  <span class="spark two" aria-hidden="true">✧</span>
+  <div class="copy">
+    <div class="eyebrow"><span></span> MAOMAO FOR DSH</div>
+    <h1>猫猫</h1>
+    <p class="tagline">给 DeepSeek Harness 的聊天伙伴</p>
+    <ul class="channels"><li>桌面</li><li>QQ</li><li>Telegram</li><li>Lark / 飞书</li></ul>
+  </div>
+  <img class="art" src="../assets/maomao-chibi.png" alt="白紫短发、琥珀色猫瞳、戴金铃铛的 Q 版猫猫挥手">
+  <div class="mark" aria-hidden="true">FI_NIAR STUDIO</div>
+</main>
