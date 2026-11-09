@@ -5,10 +5,12 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
 
 import { HarnessConversation } from './harness.mjs';
+import { QqGroupTools } from './group-tools.mjs';
+import { openChatTools } from '../chat-tools.mjs';
 import { HarnessShadowJudge } from './judge.mjs';
 import { qqCommand, qqPersonaReply, sidReply, statusReply } from './commands.mjs';
 import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
-import { GeminiImageGeneration, OpenAiImageGeneration, QqImageTool, imageRequest } from './image-generation.mjs';
+import { GeminiImageGeneration, OpenAiImageGeneration } from './image-generation.mjs';
 import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, SPLIT_IMAGE_WAIT_MS,
   textBubbles, waitsForSplitImage } from './inbound.mjs';
 import { plainQqMarkdown } from './markdown.mjs';
@@ -19,6 +21,7 @@ import { GeminiSpeech, spokenTranscript } from './speech.mjs';
 import { ConnectorState, qqStorageHome, routeKey } from './state.mjs';
 import { choiceData, parseChoiceData, parseChoiceReply } from '../choices.mjs';
 import { channelPersona } from '../personas.mjs';
+import { pairingGreeting } from '../pairing-greeting.mjs';
 import { ReplyCheck } from '../onboarding.mjs';
 import { StickerIntelligence } from './stickers.mjs';
 import { provisionQQ, verifyQQ } from './setup-qq.mjs';
@@ -66,6 +69,7 @@ export class MaomaoQqConnector {
   #imageInFlight = new Map();
   #queues = new Map();
   #shadow;
+  #groupTools = new QqGroupTools();
   #ordinary;
   #stickers = null;
   #mediaJobs = new Set();
@@ -78,8 +82,9 @@ export class MaomaoQqConnector {
   #speech = null;
   #workerOptions;
   #voiceHistory = new Map();
+  #dmNotices = new Map();
+  #dmNoticeTimes = [];
   #imageGeneration = null;
-  #imageTool = null;
 
   constructor(ctx, config, { state, harness, shadowJudge, ordinary, stickers, speech, imageGeneration,
     managedCredential, botFactory = (options) => new QQBot(options) } = {}) {
@@ -96,9 +101,9 @@ export class MaomaoQqConnector {
       workspace: config.workspace,
       agentPreset: config.agentPreset,
     });
-    const semanticJudge = config.shadow?.semantic?.enabled === true
+    const semanticJudge = config.shadow?.enabled === true
       ? new HarnessShadowJudge(ctx.sessionController, this.#state, {
-        preset: config.shadow.semantic.preset,
+        preset: config.shadow.semantic?.preset,
         workspace: config.workspace,
         selectModel: (sessionId) => ctx.get?.('maomaoModels')?.useChat?.(ctx.sessionController, sessionId),
       }) : null;
@@ -146,7 +151,6 @@ export class MaomaoQqConnector {
         this.#logger.warn?.('QQ image generation unavailable:', errorLabel(error));
       }
     }
-    if (config.dryRun !== true) this.#imageTool = new QqImageTool();
     this.#botFactory = botFactory;
   }
 
@@ -201,14 +205,66 @@ export class MaomaoQqConnector {
 
   status() {
     return Object.freeze({ channel: 'qq', running: this.#bot !== null, ready: this.#ready,
+      directMessages: this.directMessageSettings(),
       lastError: this.#lastError, shadow: this.#shadow?.status() ?? { enabled: false },
       ordinary: { enabled: this.#config.ordinary?.enabled === true }, media: this.#mediaStatus, diagnostics: this.#diagnostics,
       panelRoutes: this.#state.panelRouteCount(this.#appId),
       panelBindings: [...this.#state.panelRoutes(this.#appId), ...this.#state.panelOwnerBindings(this.#appId)] });
   }
 
-  #allowed(envelope) {
+  #paired(envelope) {
     return allowedInbound(envelope, this.#config) || this.#state.panelAllowed(envelope.botId, envelope.scope, envelope.chatId);
+  }
+
+  #allowed(envelope) {
+    return this.#paired(envelope) || (envelope.scope === 'c2c' && envelope.botId === this.#appId
+      && envelope.chatId === envelope.senderId && this.directMessageSettings().acceptStrangers);
+  }
+
+  directMessageSettings() {
+    return { acceptStrangers: this.#state.directMessageSettings(this.#appId)?.acceptStrangers
+      ?? this.#config.directMessages?.acceptStrangers === true,
+      lastInbound: this.#diagnostics.directMessage ?? null };
+  }
+
+  async saveDirectMessageSettings({ acceptStrangers } = {}) {
+    if (!this.#appId || this.#stopped || this.#config.dryRun === true) return { status: 'unavailable' };
+    if (typeof acceptStrangers !== 'boolean') return { status: 'invalid' };
+    await this.#state.saveDirectMessageSettings(this.#appId, { acceptStrangers });
+    return { status: 'saved' };
+  }
+
+  #dmAdmission(envelope) {
+    return { paired: this.#paired(envelope), owner: this.#isOwner(envelope),
+      acceptStrangers: this.directMessageSettings().acceptStrangers };
+  }
+
+  async #dmNotice(envelope, text, kind) {
+    // Fixed onboarding replies are allowed without chat admission. They never enter the LLM or memory.
+    if (envelope.scope !== 'c2c' || this.#stopped || envelope.botId !== this.#appId) return false;
+    const now = Date.now();
+    const key = `${envelope.senderId}:${kind}`;
+    const last = this.#dmNotices.get(key);
+    this.#dmNoticeTimes = this.#dmNoticeTimes.filter((at) => now - at < 60_000);
+    if ((last !== undefined && now - last < 30_000) || this.#dmNoticeTimes.length >= 30) return false;
+    this.#dmNotices.set(key, now);
+    this.#dmNoticeTimes.push(now);
+    if (this.#dmNotices.size > 1000) this.#dmNotices.delete(this.#dmNotices.keys().next().value);
+    if (!await this.#state.recordReceipt(envelope)) return false;
+    const bot = this.#bot;
+    const current = () => !this.#stopped && this.#bot === bot;
+    const ticket = await this.#state.reserve(envelope, text);
+    if (!ticket.fresh || !current()) return false;
+    let messageId;
+    try { messageId = await this.#sendText(envelope, text, ticket.seq, current); }
+    finally { await this.#state.finish(ticket.key, messageId); }
+    return Boolean(messageId);
+  }
+
+  #pairHelp(envelope) {
+    return `${this.#paired(envelope) ? '这个 QQ 私聊已获准聊天。' : '这个 QQ 私聊还没有配对。'}\n`
+      + '请在 DSH 的「设置 → 猫猫 → 渠道与会话」选择 QQ，在「会话与权限 → 添加绑定 → 绑定 QQ 群或私聊」选择「QQ 私聊」，生成配对指令。\n'
+      + '把完整的 /pair 配对码发到这里，再把收到的确认码填回面板。陌生人聊天开关不会自动绑定主人。';
   }
 
   memorySources() {
@@ -231,14 +287,44 @@ export class MaomaoQqConnector {
         targets.set(target.id, { ...target, ...(scope === 'group' ? { groupOpenId: chatId } : {}) });
       }
     }
-    for (const { id, scope, groupOpenId } of this.#state.panelRoutes(this.#appId)) {
+    for (const { id, scope, groupOpenId, userOpenId } of this.#state.panelRoutes(this.#appId)) {
       if ((scope === 'group' || scope === 'c2c') && !targets.has(id)) {
-        targets.set(id, { id, kind: scope === 'group' ? 'qq-group' : 'qq-dm', groupOpenId });
+        targets.set(id, { id, kind: scope === 'group' ? 'qq-group' : 'qq-dm', groupOpenId, userOpenId });
       }
     }
     return [...targets.values()].sort((a, b) => a.id.localeCompare(b.id)).map((target) => ({
-      ...target, label: `${target.kind === 'qq-group' ? 'QQ 群' : 'QQ 私聊'} · ${(target.groupOpenId ?? target.id).slice(-8)}`,
+      ...target, label: `${target.kind === 'qq-group' ? 'QQ 群' : 'QQ 私聊'} · ${(target.groupOpenId ?? target.userOpenId ?? target.id).slice(-8)}`,
     }));
+  }
+
+  #groupPeer(chatId) {
+    const delivery = this.#config.shadow?.delivery;
+    const legacy = Object.hasOwn(delivery?.peers ?? {}, chatId) ? delivery.peers[chatId] : null;
+    const active = delivery?.enabled === true && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(chatId)
+      && this.#config.shadow?.semantic?.enabled === true
+      && (!Array.isArray(this.#config.shadow.semantic.groupAllowlist)
+        || this.#config.shadow.semantic.groupAllowlist.includes(chatId));
+    const saved = this.#state.peerSettings(this.#appId, chatId);
+    return { enabled: Boolean(this.#shadow && (saved?.enabled ?? (active && legacy))),
+      paused: saved?.paused === true, maxRounds: saved?.maxRounds ?? 3, waitMs: legacy?.waitMs };
+  }
+
+  peerGroups() {
+    return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
+      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId) }));
+  }
+
+  async savePeerGroup({ id, enabled, maxRounds, paused }) {
+    const group = this.personaTargets().find((target) => target.id === id && target.kind === 'qq-group');
+    if (!group?.groupOpenId || !this.#shadow) return { status: 'unavailable' };
+    if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5) {
+      return { status: 'invalid' };
+    }
+    this.#shadow.cancelPeer({ botId: this.#appId, chatId: group.groupOpenId });
+    await this.#state.savePeerSettings(this.#appId, group.groupOpenId, {
+      enabled, paused, maxRounds,
+    });
+    return { status: 'saved' };
   }
 
   #isOwner({ botId, scope, chatId, senderId }) {
@@ -253,6 +339,7 @@ export class MaomaoQqConnector {
     if (this.#pairing?.expires <= Date.now()) this.#pairing = null;
     if (action === 'start') {
       if (!this.#ready || this.#config.dryRun === true) return { status: 'unavailable' };
+      if (!['group', 'c2c', 'owner'].includes(scope)) return { status: 'invalid' };
       if (this.#pairing) return { status: 'busy' };
       this.#pairing = { id: randomUUID(), scope, code: randomBytes(12).toString('hex'),
         expires: Date.now() + 5 * 60_000, attempts: 0 };
@@ -282,6 +369,7 @@ export class MaomaoQqConnector {
         if (!await this.#state.bindPanelOwner(botId, chatId, senderId, configured)) return { status: 'unavailable' };
       } else {
         await this.#state.allowPanelRoute(botId, scope, chatId);
+        this.#greetAfterPairing(pairing.envelope);
       }
       return pairing.scope === 'owner' ? { status: 'bound' } : { status: 'bound', route: routeKey(botId, scope, chatId) };
     }
@@ -294,6 +382,27 @@ export class MaomaoQqConnector {
     if (!this.#ready || this.#config.dryRun === true
       || !this.#state.panelRoutes(this.#appId).some((entry) => entry.id === route)) return { status: 'unavailable' };
     return this.#replyCheck.start(route);
+  }
+
+  #greetAfterPairing(envelope) {
+    const profile = channelPersona(this.#ctx, personaTarget(envelope));
+    const bot = this.#bot;
+    this.#observeReceipt(envelope);
+    // Same queue and Harness session as subsequent messages. Do not observe this
+    // host event as a user memory, nor expose the pairing code to the model.
+    this.#enqueue(envelope, async () => {
+      const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(120_000)]);
+      const current = () => !signal.aborted && this.#bot === bot && profile.current()
+        && this.#state.panelAllowed(envelope.botId, envelope.scope, envelope.chatId);
+      if (!current()) return;
+      const owner = this.#isOwner(envelope);
+      const reply = await this.#harness.ask({ ...envelope,
+        text: pairingGreeting({ group: envelope.scope === 'group', owner }), attachments: [], quotedImages: [],
+      }, { profile, owner, models: this.#ctx.get?.('maomaoModels'), signal });
+      this.#diagnostics.model = { outcome: reply ? 'ok' : 'empty', at: Date.now() };
+      if (!reply || !current()) return;
+      await this.respond(envelope.receiptKey, parseChoiceReply(reply).text, { current, limit: 1 });
+    });
   }
 
   async stop() {
@@ -311,6 +420,8 @@ export class MaomaoQqConnector {
     this.#imageInFlight.clear();
     this.#imageDetails.clear();
     this.#voiceHistory.clear();
+    this.#dmNotices.clear();
+    this.#dmNoticeTimes = [];
     this.#pairing = null;
     await this.#shadow?.stop();
     await this.#ordinary?.stop();
@@ -321,27 +432,48 @@ export class MaomaoQqConnector {
     const delivery = this.#config.shadow?.delivery;
     const passiveGroup = message?.kind === 'group' && delivery?.enabled === true
       && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(message.groupOpenid);
-    const peer = passiveGroup && Object.hasOwn(delivery.peers ?? {}, message.groupOpenid)
-      ? delivery.peers[message.groupOpenid] : null;
-    if (message?.senderIsBot === true && peer?.name
-      && (peer.memberId ? message.senderId === peer.memberId : message.senderName === peer.name)) {
+    const peerSettings = message?.kind === 'group' ? this.#groupPeer(message.groupOpenid) : null;
+    const peer = peerSettings?.enabled ? peerSettings : null;
+    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
+    const allowJudgment = this.#config.shadow?.semantic?.enabled === true
+      && (!Array.isArray(judgeGroups) || judgeGroups.includes(message?.groupOpenid));
+    if (message?.senderIsBot === true && peer) {
       const group = { botId: this.#appId, scope: 'group', chatId: message.groupOpenid };
       if (!this.#allowed(group) || message.senderId === this.#appId) return false;
-      this.#shadow?.notePeer(this.#appId, group.chatId, peer.name, message.content, message.messageId);
+      const enabled = () => {
+        const settings = this.#groupPeer(group.chatId);
+        return this.#allowed(group) && settings.enabled && !settings.paused && settings.maxRounds === peer.maxRounds;
+      };
+      const recall = this.#config.ordinary?.enabled === true && this.#ordinary
+        ? (anchor, query) => this.#ordinary.media('peer_context', anchor, { query }).catch(() => null) : undefined;
+      void this.#shadow?.notePeer(this.#appId, group.chatId, peer, message, { enabled, recall }).then((turn) => {
+        if (turn) return this.#queueAnswer(turn.anchor, turn.memory, true, null, peer,
+          { peerTurn: turn.peerTurn, peerCurrent: turn.current }).finally(turn.release);
+      }).catch((error) => this.#logger.warn?.('QQ peer judgment unavailable:', errorLabel(error)));
       return true;
     }
-    const envelope = normalizeInbound(message, Date.now(), this.#appId, peer);
+    const envelope = normalizeInbound(message, Date.now(), this.#appId);
     if (!envelope) return false;
     const allowed = this.#allowed(envelope);
     const commandText = envelope.text.replace(/^<@!?[A-Za-z0-9_-]{1,128}>\s*/, '');
+    if (envelope.scope === 'c2c') {
+      this.#diagnostics.directMessage = { at: Date.now(), outcome: allowed ? 'admitted' : 'needs_pairing' };
+      if (commandText.toLowerCase() === '/pair') return this.#dmNotice(envelope, this.#pairHelp(envelope), 'pair');
+      if (!allowed && qqCommand(envelope) === '/sid') {
+        return this.#dmNotice(envelope, sidReply(envelope, this.#dmAdmission(envelope)), 'sid');
+      }
+    }
     if (/^\/pair(?:\s|$)/i.test(commandText)) {
       const pairCode = envelope.addressed && /^\/pair ([a-f0-9]{24})$/.exec(commandText)?.[1];
       const pairing = this.#pairing;
       const matching = pairing?.scope === 'owner'
         ? allowed && envelope.scope === 'group' && !this.#state.panelOwnsGroup(envelope.botId, envelope.chatId, envelope.senderId)
-        : !allowed && pairing?.scope === envelope.scope;
+        : !this.#paired(envelope) && pairing?.scope === envelope.scope;
       if (!pairCode || !matching || pairing.envelope
-        || pairing.expires <= Date.now() || pairing.code !== pairCode) return false;
+        || pairing.expires <= Date.now() || pairing.code !== pairCode) {
+        return envelope.scope === 'c2c' ? this.#dmNotice(envelope,
+          this.#paired(envelope) ? this.#pairHelp(envelope) : '配对指令已失效或不匹配，请在猫猫面板重新生成 QQ 私聊配对指令。发送 /pair 查看步骤。', 'pair') : false;
+      }
       pairing.envelope = envelope;
       pairing.proof = randomBytes(4).toString('hex');
       try {
@@ -358,15 +490,27 @@ export class MaomaoQqConnector {
       } finally { pairing.delivery ??= 'failed'; }
       return true;
     }
-    if (!allowed) return false;
+    if (!allowed) return envelope.scope === 'c2c' ? this.#dmNotice(envelope,
+      '猫猫收到了，但这个 QQ 私聊还没有获准聊天。发送 /sid 查看身份，或发送 /pair 查看配对步骤。', 'welcome') : false;
     if (!await this.#state.recordReceipt(envelope)) return false;
     this.#diagnostics.receive = { outcome: 'ok', at: Date.now() };
     this.#observeReceipt(envelope);
+    if (peer && /^\/(?:stop|停止互动|resume|恢复互动)$/i.test(commandText)) {
+      const paused = /^\/(?:stop|停止互动)$/i.test(commandText);
+      if (!paused && !this.#isOwner(envelope)) {
+        await this.respond(envelope.receiptKey, '请由已绑定的群主人恢复同伴互动。');
+        return true;
+      }
+      this.#shadow.cancelPeer(envelope);
+      await this.#state.savePeerSettings(envelope.botId, envelope.chatId, { paused });
+      await this.respond(envelope.receiptKey, paused ? '已暂停本群的同伴互动。' : '已恢复本群的同伴互动。');
+      return true;
+    }
     const test = envelope.addressed && this.#replyCheck.receive(
       routeKey(envelope.botId, envelope.scope, envelope.chatId), envelope.text);
     if (test) {
-      if (this.#config.respondToMentions === false) test('replies_disabled');
-      else this.#queueAnswer(envelope, null, false, null, null, false, null, test);
+      if (envelope.scope === 'group' && this.#config.respondToMentions === false) test('replies_disabled');
+      else this.#queueAnswer(envelope, null, false, null, null, undefined, null, test);
       return true;
     }
     // This is a trusted, per-message event. The Harness prompt does not carry authorization data.
@@ -381,16 +525,15 @@ export class MaomaoQqConnector {
         return true;
       }
       this.#enqueue(envelope, async () => {
-        const answer = command === '/sid' ? sidReply(envelope) : await this.#statusReply(envelope);
+        const answer = command === '/sid' ? sidReply(envelope, this.#dmAdmission(envelope)) : await this.#statusReply(envelope);
         await this.respond(envelope.receiptKey, answer);
       });
       return true;
     }
     const priorImage = recentImageFor(envelope, this.#observed.values());
-    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
-    const allowJudgment = !Array.isArray(judgeGroups) || judgeGroups.includes(envelope.chatId);
     const shadowDecision = this.#shadow?.observe(envelope, {
       hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment,
+      onPeerStop: peer ? () => this.#state.savePeerSettings(envelope.botId, envelope.chatId, { paused: true }) : undefined,
     }) ?? null;
     if (shadowDecision) void shadowDecision.catch((error) =>
       this.#logger.warn?.('QQ shadow unavailable:', errorLabel(error)));
@@ -403,14 +546,14 @@ export class MaomaoQqConnector {
       }
       catch (error) { this.#logger.warn?.('QQ ordinary memory unavailable:', errorLabel(error)); }
     }
-    if (envelope.addressed && this.#config.respondToMentions !== false
+    if (envelope.addressed && (envelope.scope === 'c2c' || this.#config.respondToMentions !== false)
       && (envelope.text || priorImage || inboundImage(envelope) || waitsForSplitImage(envelope)
         || envelope.attachments.some((item) => item.asrText))) {
       this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
-    } else if (shadowDecision && passiveGroup && this.#config.shadow?.semantic?.enabled === true) {
+    } else if (shadowDecision && (passiveGroup && allowJudgment || peer && !peer.paused)) {
       void shadowDecision.then((row) => {
         if (row?.decision === 'would_reply' && this.#shadow?.isLatest(envelope)) {
-          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer, row.mode === 'peer_handoff');
+          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer);
         }
       }).catch((error) => this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error)));
     }
@@ -448,7 +591,7 @@ export class MaomaoQqConnector {
     envelope.replyAnchor = Object.freeze(anchor);
     this.#observeReceipt(Object.freeze(envelope));
     this.#diagnostics.choice = { outcome: 'ok', at: Date.now() };
-    this.#queueAnswer(envelope, null, false, null, null, false, profile.token);
+    this.#queueAnswer(envelope, null, false, null, null, undefined, profile.token);
   }
 
   #observeReceipt(envelope) {
@@ -466,15 +609,17 @@ export class MaomaoQqConnector {
     }
   }
 
-  #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null, handoff = false, choiceProfile = null, test = null) {
+  #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null,
+    { peerTurn = null, peerCurrent = null } = {}, choiceProfile = null, test = null) {
     const queued = this.#enqueue(envelope, async () => {
       const profile = channelPersona(this.#ctx, personaTarget(envelope));
       if (envelope.receivedAt < profile.changedAt || (choiceProfile && choiceProfile !== profile.token)) return;
       const current = () => !this.#stopped && this.#allowed(envelope) && profile.current()
+        && (!peerCurrent || peerCurrent())
         && (!passive || this.#shadow?.isLatest(envelope) === true);
       if (!current()) return;
       let linkedImage = priorImage;
-      if (!test && waitsForSplitImage(envelope)) {
+      if (!test && !peerTurn && waitsForSplitImage(envelope)) {
         const remaining = envelope.receivedAt + SPLIT_IMAGE_WAIT_MS - Date.now();
         if (remaining > 0) await wait(remaining, undefined, { signal: this.#abort.signal }).catch(() => {});
         if (!current()) return;
@@ -482,13 +627,13 @@ export class MaomaoQqConnector {
       }
       const source = linkedImage ?? envelope;
       const attachment = inboundImage(source);
-      const quoted = attachment && source.quotedImages?.includes(attachment);
+      const quoted = !peerTurn && attachment && source.quotedImages?.includes(attachment);
       const visionSource = quoted ? { ...source, attachments: [attachment] } : source;
       const models = this.#ctx.get?.('maomaoModels');
       const visionChoice = models?.mediaChoice?.('vision');
       const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(120_000)]);
-      let images = test ? [] : await this.loadImages(source.receiptKey);
-      let imageDescription = this.#imageDetails.get(source.receiptKey);
+      let images = test || peerTurn ? [] : await this.loadImages(source.receiptKey);
+      let imageDescription = peerTurn ? null : this.#imageDetails.get(source.receiptKey);
       // The standard Gemini image route has no GIF input. With enrichment enabled, use the same JPEG preview.
       if (images[0]?.mediaType === 'image/gif' && (this.#ordinary || visionChoice?.enabled)) {
         this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
@@ -512,14 +657,28 @@ export class MaomaoQqConnector {
         } else imageDescription = null;
         images = [];
       }
-      const speech = !choiceProfile && envelope.text && models?.mediaChoice?.('voice')
-        ? await models.mediaAdapter('voice').catch(() => null) : this.#speech;
-      const voice = test || choiceProfile || (passive && peer) ? null : await this.#voiceIntent(envelope, speech, profile.token);
-      if (!current()) return;
-      const generation = !choiceProfile && this.#imageTool && !voice && envelope.addressed && imageRequest(envelope.text)
-        ? models?.mediaChoice?.('image') ? await models.mediaAdapter('image').catch(() => null) : this.#imageGeneration : null;
-      const imageTool = generation ? this.#openImageTool(envelope, source, quoted ? null : reference, current, generation) : null;
-      const choices = !test && envelope.scope === 'group' && !passive && !voice && !imageTool
+      const speechKey = JSON.stringify([envelope.botId, envelope.scope, envelope.chatId, peerTurn?.senderId ?? envelope.senderId, profile.token]);
+      const lastSpeech = this.#voiceHistory.get(speechKey);
+      const voice = !peerTurn && lastSpeech && Date.now() - lastSpeech.at < 5 * 60_000 ? { previous: lastSpeech.text } : null;
+      const imageEnabled = models?.mediaChoice?.('image')?.enabled ?? Boolean(this.#imageGeneration);
+      const voiceEnabled = models?.mediaChoice?.('voice')?.enabled ?? Boolean(this.#speech);
+      const chatTools = test ? null : openChatTools({ current, signal, web: this.#ctx.get?.('web'),
+        hasReference: !peerTurn && !quoted && source.senderId === envelope.senderId && Boolean(reference),
+        image: imageEnabled ? async (args, toolSignal) => {
+          const generation = models?.mediaChoice?.('image') ? await models.mediaAdapter('image') : this.#imageGeneration;
+          if (!generation) return 'unavailable';
+          return this.#generateImage(envelope, args.use_reference ? reference : null, current, generation, args, toolSignal);
+        } : null,
+        voice: voiceEnabled ? async (text, toolSignal) => {
+          const speech = models?.mediaChoice?.('voice') ? await models.mediaAdapter('voice') : this.#speech;
+          if (!speech) return 'unavailable';
+          return this.#voiceReply(envelope, text, { key: speechKey }, current, speech, toolSignal);
+        } : null,
+      });
+      const groupTools = !test && envelope.scope === 'group' ? this.#groupTools.open({
+        bot: this.#bot, groupId: envelope.chatId, speakerId: peerTurn?.senderId ?? envelope.senderId, current,
+      }) : null;
+      const choices = !test && envelope.scope === 'group' && !passive
         && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group');
       const reply = await this.#harness.ask(envelope, {
         images,
@@ -530,16 +689,16 @@ export class MaomaoQqConnector {
         ordinaryContext,
         profile,
         voice,
-        imageTool,
+        chatTools,
+        groupTools,
         passive,
-        peer,
-        handoff,
+        peerTurn,
         choices,
-        owner: this.#isOwner(envelope),
+        owner: !peerTurn && this.#isOwner(envelope),
         models,
         signal,
       }).then((reply) => {
-        this.#diagnostics.model = { outcome: reply || imageTool?.outcome() === 'sent' ? 'ok' : 'empty', at: Date.now() };
+        this.#diagnostics.model = { outcome: reply || chatTools?.outcome() === 'sent' ? 'ok' : 'empty', at: Date.now() };
         return reply;
       }).catch((error) => {
         test?.('model_failed');
@@ -547,23 +706,17 @@ export class MaomaoQqConnector {
         throw error;
       });
       const { text: answer, options } = parseChoiceReply(reply ?? '');
-      if (imageTool?.outcome() === 'sent' || imageTool?.outcome() === 'uncertain') return;
+      if (['sent', 'uncertain'].includes(chatTools?.outcome())) return;
       if (!current()) return;
       if (!answer) {
         test?.('model_empty');
-        if (imageTool) await this.respond(envelope.receiptKey, '这次图没生成成功，等会儿再试一下喵。', { current });
-        return;
-      }
-      if (voice) {
-        const outcome = await this.#voiceReply(envelope, answer, voice, current, speech);
-        if (outcome !== 'unavailable' || !current()) return;
-        await this.respond(envelope.receiptKey, `这次语音没发出去，先给你文字版喵。<|bubble|>${answer}`, { current });
+        if (chatTools?.outcome()) await this.respond(envelope.receiptKey, '这次媒体没发出去，等会儿再试一下喵。', { current });
         return;
       }
       const limit = test || choiceProfile || (passive && peer) ? 1 : undefined;
       const card = choices && options.length ? { profile: profile.token, options } : null;
       test?.('sending');
-      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card }).catch((error) => {
+      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn) }).catch((error) => {
         test?.('delivery_failed');
         throw error;
       });
@@ -575,66 +728,37 @@ export class MaomaoQqConnector {
       }
     });
     if (test) void queued.then(() => test('interrupted'), () => test('interrupted'));
+    return queued;
   }
 
-  #openImageTool(envelope, source, image, current, generation) {
-    const reference = source.senderId === envelope.senderId && image?.mediaType !== 'image/gif' ? image : null;
-    return this.#imageTool.open({
-      current,
-      reference,
-      run: async (args, signal) => {
-        const deadline = envelope.scope === 'group' ? 300_000 : 60_000;
-        const remaining = deadline - (Date.now() - envelope.receivedAt) - 10_000;
-        if (remaining <= 0 || signal.aborted || !current()) return 'cancelled';
-        try {
-          if (!await this.#state.reserveImage(envelope)) return 'limit';
-          const output = await generation.generate(
-            `为全年龄 QQ 聊天生成图片。\n${args.prompt.trim()}`, {
-              reference: args.use_reference ? reference : null,
-              aspectRatio: args.aspect_ratio,
-              signal: AbortSignal.any([signal, this.#abort.signal, AbortSignal.timeout(remaining)]),
-            });
-          if (!output) return 'unavailable';
-          return await this.#sendMedia(envelope, { ...output, fileType: MediaFileType.IMAGE,
-            fingerprint: 'generated-image:reply' }, () => !signal.aborted && current());
-        } catch (error) {
-          this.#logger.warn?.('QQ image generation failed:', errorLabel(error));
-          return signal.aborted || !current() ? 'cancelled' : 'unavailable';
-        }
-      },
-    });
-  }
-
-  async #voiceIntent(envelope, speech, personaToken) {
-    if (!speech || !envelope.text) return null;
-    const key = JSON.stringify([envelope.botId, envelope.scope, envelope.chatId, envelope.senderId, personaToken]);
-    const last = this.#voiceHistory.get(key);
-    this.#voiceHistory.delete(key);
+  async #generateImage(envelope, reference, current, generation, args, signal) {
+    const deadline = envelope.scope === 'group' ? 300_000 : 60_000;
+    const remaining = deadline - (Date.now() - envelope.receivedAt) - 10_000;
+    if (remaining <= 0 || signal.aborted || !current()) return 'cancelled';
     try {
-      this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
-      const intent = await this.#ordinary.media('voice_intent', envelope);
-      const age = last ? envelope.receivedAt - last.at : Infinity;
-      const prior = intent.followup && age >= 0 && age <= 5 * 60_000 ? last : null;
-      return intent.requested || prior
-        ? { key, language: intent.language || prior?.language || '', previous: prior?.text || '' } : null;
-    } catch (error) {
-      this.#logger.warn?.('QQ voice intent unavailable:', errorLabel(error));
-      return null;
-    }
+      if (!await this.#state.reserveImage(envelope)) return 'limit';
+      const output = await generation.generate(`为全年龄聊天生成图片。\n${args.prompt.trim()}`, {
+        reference, aspectRatio: args.aspect_ratio,
+        signal: AbortSignal.any([signal, this.#abort.signal, AbortSignal.timeout(remaining)]),
+      });
+      if (!output) return 'unavailable';
+      return await this.#sendMedia(envelope, { ...output, fileType: MediaFileType.IMAGE,
+        fingerprint: 'generated-image:reply' }, () => !signal.aborted && current());
+    } catch { return signal.aborted || !current() ? 'cancelled' : 'unavailable'; }
   }
 
-  async #voiceReply(envelope, answer, voice, current, speech) {
+  async #voiceReply(envelope, answer, voice, current, speech, signal) {
     try {
       const text = spokenTranscript(answer);
       const replyWindow = envelope.scope === 'group' ? 300_000 : 60_000;
       const remaining = replyWindow - (Date.now() - envelope.receivedAt) - 8_000;
       if (remaining <= 0) return 'unavailable';
       const audio = await speech.synthesize(text,
-        AbortSignal.any([this.#abort.signal, AbortSignal.timeout(remaining)]));
-      if (!current()) return 'cancelled';
+        AbortSignal.any([signal, this.#abort.signal, AbortSignal.timeout(remaining)]));
+      if (signal.aborted || !current()) return 'cancelled';
       const outcome = await this.#sendMedia(envelope, {
         fileType: MediaFileType.VOICE, buffer: audio, fileName: 'maomao-voice.wav', fingerprint: 'voice:reply',
-      }, current);
+      }, () => !signal.aborted && current());
       if (outcome === 'sent') {
         this.#shadow?.noteReply(envelope, text);
         this.#voiceHistory.set(voice.key, { at: Date.now(), text, language: voice.language });
@@ -791,7 +915,7 @@ export class MaomaoQqConnector {
     return this.#imageInFlight.get(receiptKey);
   }
 
-  async respond(receiptKey, text, { current = () => true, limit, card = null } = {}) {
+  async respond(receiptKey, text, { current = () => true, limit, card = null, optional = false } = {}) {
     const envelope = this.#observed.get(receiptKey);
     if (!envelope || !this.#allowed(envelope) || Date.now() - envelope.receivedAt > 10 * 60_000) {
       throw new Error('QQ inbound receipt is unavailable');
@@ -805,8 +929,8 @@ export class MaomaoQqConnector {
     const sent = [];
     for (const [index, part] of parts.entries()) {
       if (!stillAllowed()) break;
-      const ticket = await this.#state.reserve(anchor, `${envelope.replyAnchor ? envelope.receiptKey : ''}${index}\u0000${part}`);
-      if (!ticket.fresh) continue;
+      const ticket = await this.#state.reserve(anchor, `${envelope.replyAnchor ? envelope.receiptKey : ''}${index}\u0000${part}`, { optional });
+      if (!ticket?.fresh) continue;
       try {
         if (!stillAllowed()) {
           await this.#state.finish(ticket.key);
@@ -826,7 +950,7 @@ export class MaomaoQqConnector {
         if (!messageId) throw new Error('QQ send result did not include a message id');
         sent.push(messageId);
         this.#diagnostics.reply = { outcome: 'ok', at: Date.now() };
-        this.#shadow?.noteReply(envelope, part);
+        this.#shadow?.noteReply(envelope, part, messageId);
       } catch (error) {
         this.#diagnostics.reply = { outcome: 'failed', at: Date.now() };
         await this.#state.finish(ticket.key);
@@ -842,6 +966,7 @@ export class MaomaoQqConnector {
       extra: { msg_seq: seq },
     };
     if (!current()) return '';
+    this.#shadow?.noteOutbound(envelope, content);
     const plain = plainQqMarkdown(content);
     if ((keyboard || (!choices && plain !== content)) && this.#config.markdownSupport !== false && !this.#markdownDenied.has(envelope.scope)) {
       try {
@@ -872,6 +997,8 @@ function mount(ctx, config, managedCredential) {
     status: () => connector.status(),
     ...(config.dryRun === true ? {} : { pair: (request) => connector.pair(request),
       replyCheck: (request) => connector.replyCheck(request), unbind: (id) => connector.unbind(id),
+      saveDirectMessageSettings: (request) => connector.saveDirectMessageSettings(request),
+      peerGroups: () => connector.peerGroups(), savePeerGroup: (request) => connector.savePeerGroup(request),
       memorySources: () => connector.memorySources(), personaTargets: () => connector.personaTargets() }),
   }));
   if (config.dryRun === true) return;

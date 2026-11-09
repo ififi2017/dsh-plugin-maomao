@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
+import { plainQqMarkdown } from './markdown.mjs';
 
 const CONTEXT_MS = 8 * 60_000;
 const FOLLOWUP_MS = 5 * 60_000;
@@ -10,6 +11,7 @@ const REPLY_GAP_MS = 4_000;
 const HOUR_MS = 60 * 60_000;
 const PEER_SETTLE_MS = 1_500;
 const MAX_PEER_RECHECKS = 2;
+const PEER_BANTER_WINDOW_MS = 60_000;
 const NAME_HINT = /猫猫|lxc|小猫|喵/i;
 const QUESTION_HINT = /[?？]|吗$|么$|呢$|有人(?:知道|懂|会|用过|拍过)|求(?:推荐|助|问)|怎么|为啥|为什么|哪(?:里|儿|个|款)|是什么|是啥|啥鸟|什么鸟|有多/;
 
@@ -25,20 +27,6 @@ function displayText(envelope) {
   const kinds = envelope.attachments.map((item) => item.kind === 'image' ? '[图片]'
     : item.kind === 'audio' ? '[语音]' : item.kind === 'video' ? '[视频]' : '[文件]');
   return oneLine([envelope.text, ...kinds].filter(Boolean).join(' '));
-}
-
-function asksToCallCat(text, selfName) {
-  const compact = (value) => value.normalize('NFKC').replace(/\s+/gu, '');
-  const name = compact(selfName ?? '');
-  if (!name) return false;
-  const shortName = /[0-9]+号$/.exec(name)?.[0];
-  const targets = (shortName ? [name, shortName] : [name]).map((value) => RegExp.escape(value)).join('|');
-  const request = new RegExp(
-    `(?:^|[，。！？,!?；;：:])(?:麻烦你?|能不能|可以|帮我|请你|你)?`
-    + `(?:叫(?:一下|一声)?|喊(?:一下|一声)?|问问|让|请)(?:${targets})`
-    + '(?=$|[，。！？,!?；;：:]|出来|过来|看看|说|讲|回|答|接|聊|是不是|在不在|有没有|也|一起|来)',
-  );
-  return request.test(compact(text.replace(/<@!?[A-Za-z0-9_-]+>/g, '')));
 }
 
 export class PassiveShadow {
@@ -70,7 +58,8 @@ export class PassiveShadow {
     const key = this.#key(envelope);
     if (!this.#groups.has(key)) {
       this.#groups.set(key, { rows: [], version: 0, inboundAt: 0, gap: 0,
-        latestMessageId: '', botAt: 0, botText: '', recipient: '', lastOpen: 0, openers: [], pending: null, peerVersion: 0 });
+        latestHuman: null, botAt: 0, botText: '', recipient: '', lastOpen: 0, openers: [],
+        pending: null, peerVersion: 0, peerJob: null, peerRounds: 0, lastPeerBanterAt: null, interrupt: null, outbound: [] });
     }
     return this.#groups.get(key);
   }
@@ -100,14 +89,18 @@ export class PassiveShadow {
     return operation;
   }
 
-  async observe(envelope, { hasReferencedImage = false, peer = null, allowJudgment = true } = {}) {
+  async observe(envelope, { hasReferencedImage = false, peer = null, allowJudgment = true, onPeerStop } = {}) {
     if (this.#closed || envelope?.channel !== 'qq' || envelope.scope !== 'group') return null;
     const now = this.#clock();
     const state = this.#state(envelope);
+    const hadPeerJob = Boolean(state.peerJob);
+    const previousInterrupt = state.interrupt;
     state.gap = state.inboundAt ? now - state.inboundAt : 0;
     state.inboundAt = now;
     state.version += 1;
-    state.latestMessageId = envelope.messageId;
+    state.latestHuman = envelope;
+    state.peerRounds = 0;
+    state.peerJob = null;
     state.rows = state.rows.filter((row) => now - row.at <= CONTEXT_MS);
     const shown = displayText(envelope);
     if (shown) state.rows.push({ at: now, role: 'user', speaker: digest(envelope.senderId),
@@ -118,8 +111,27 @@ export class PassiveShadow {
       state.pending.resolve(null);
       state.pending = null;
     }
+    state.interrupt = previousInterrupt;
+    if (peer && !peer.paused && onPeerStop && this.#judge && envelope.text.trim()
+      && (hadPeerJob || state.lastPeerBanterAt !== null && now - state.lastPeerBanterAt <= PEER_BANTER_WINDOW_MS)) {
+      const payload = {
+        mode: 'peer_interrupt',
+        recent_messages: this.contextFor(envelope),
+        current: { role: 'user', text: oneLine(envelope.text, 400) },
+      };
+      const interrupt = Promise.resolve(previousInterrupt).then(async (stopped) => {
+        if (stopped || this.#closed) return Boolean(stopped);
+        const verdict = await this.#judge(payload, envelope);
+        if (verdict?.stop !== true || this.#closed) return false;
+        this.cancelPeer(envelope);
+        await onPeerStop();
+        return true;
+      }).catch(() => false);
+      state.interrupt = interrupt;
+      void interrupt.finally(() => { if (state.interrupt === interrupt) state.interrupt = null; });
+    }
     if (envelope.addressed) return this.#audit(envelope, 'addressed', 'skip', 'direct_reply_path');
-    if (envelope.addressedToOther && !envelope.addressedToPeer) {
+    if (envelope.addressedToOther && (!peer || peer.paused)) {
       return this.#audit(envelope, 'unsolicited', 'skip', 'addressed_other');
     }
     if (!envelope.text.trim()) return this.#audit(envelope, 'unsolicited', 'skip', 'no_text');
@@ -127,13 +139,14 @@ export class PassiveShadow {
     const named = NAME_HINT.test(envelope.text);
     const followup = state.botAt && now - state.botAt <= FOLLOWUP_MS
       && (envelope.senderId === state.recipient || QUESTION_HINT.test(envelope.text));
-    const handoff = envelope.addressedToPeer && asksToCallCat(envelope.text, peer?.selfName);
-    const mode = handoff ? 'peer_handoff' : envelope.addressedToPeer ? 'peer_addressed'
+    const mode = envelope.addressedToOther ? 'group_interjection'
       : named ? 'named' : followup ? 'followup' : 'unsolicited';
+    const canJudge = allowJudgment || peer && !peer.paused;
+    if (!canJudge) return this.#audit(envelope, mode, 'candidate', 'semantic_judge_unavailable');
     if (state.botAt && now - state.botAt < REPLY_GAP_MS) {
       return this.#audit(envelope, mode, 'skip', 'reply_gap');
     }
-    const interjection = mode === 'unsolicited' || mode === 'peer_addressed';
+    const interjection = mode === 'unsolicited';
     if (interjection) {
       state.openers = state.openers.filter((at) => now - at < HOUR_MS);
       const owner = this.#ownerIds.has(envelope.senderId) || this.#isOwner(envelope);
@@ -149,7 +162,6 @@ export class PassiveShadow {
       recent_messages: this.contextFor(envelope),
       current: { speaker: digest(envelope.senderId), text: oneLine(envelope.text),
         ...(hasReferencedImage ? { recent_image_available: true } : {}) },
-      ...(peer ? { self_name: peer.selfName, other_cat: peer.name } : {}),
       seconds_since_cat_reply: state.botAt ? Math.floor((this.#clock() - state.botAt) / 1000) : null,
       same_recipient: Boolean(envelope.senderId && envelope.senderId === state.recipient) });
     const task = new Promise((resolve) => {
@@ -157,10 +169,10 @@ export class PassiveShadow {
         state.pending = null;
         try {
           if (this.#closed || state.version !== version) return resolve(null);
-          if (!allowJudgment || (!handoff && !this.#judge)) {
+          if (await state.interrupt || this.#closed || state.version !== version) return resolve(null);
+          if (!this.#judge) {
             return resolve(await this.#audit(envelope, mode, 'candidate', 'semantic_judge_unavailable'));
           }
-          if (handoff) return resolve(await this.#audit(envelope, mode, 'would_reply', 'explicit_handoff'));
           let verdict;
           let rechecks = 0;
           while (true) {
@@ -189,37 +201,116 @@ export class PassiveShadow {
         } catch {
           resolve(await this.#audit(envelope, mode, 'skip', 'judge_error'));
         }
-      }, peer && mode !== 'followup' ? Math.max(this.#delay, peer.waitMs ?? 12_000) : this.#delay);
+      }, mode === 'group_interjection' ? Math.max(this.#delay, peer.waitMs ?? 3_000) : this.#delay);
       state.pending = { timer, resolve };
     });
+    state.humanJudging = envelope;
     this.#pending.add(task);
-    void task.finally(() => this.#pending.delete(task));
+    void task.finally(() => {
+      if (state.humanJudging === envelope) state.humanJudging = null;
+      this.#pending.delete(task);
+    });
     return task;
   }
 
-  notePeer(botId, chatId, name, text, messageId) {
-    if (this.#closed || !text || !messageId) return;
-    const state = this.#groups.get(this.#key({ botId, chatId }));
-    if (!state || state.rows.some((row) => row.messageId === messageId)) return;
+  async notePeer(botId, chatId, peer, message, { enabled, recall } = {}) {
+    const { messageId, content, senderId } = message;
+    const text = oneLine(content, 400);
+    if (this.#closed || !text || !messageId) return null;
+    const group = { botId, chatId, scope: 'group' };
+    const state = this.#groups.get(this.#key(group));
+    if (!state || state.rows.some((row) => row.messageId === messageId)) return null;
+    const now = this.#clock();
+    if (state.outbound.some((row) => now - row.at < 15_000
+      && row.text === oneLine(plainQqMarkdown(content), 400))) return null;
+    const speaker = oneLine(message.senderName || message.raw?.author?.nickname, 64) || digest(senderId ?? '');
     state.peerVersion += 1;
-    state.rows.push({ at: this.#clock(), role: 'peer', speaker: name, text: oneLine(text, 400), messageId });
+    state.rows.push({ at: now, role: 'participant', speaker, senderId, text, messageId });
     state.rows = state.rows.slice(-30);
+
+    if (!enabled?.() || !this.#judge || state.peerJob) return null;
+    const anchor = state.latestHuman;
+    const audit = (decision, reason) =>
+      this.#audit({ ...group, receiptKey: `qq:${botId}:group:${chatId}:${messageId}` }, 'peer_banter', decision, reason);
+    if (!anchor || state.humanJudging === anchor || now - anchor.receivedAt > PEER_BANTER_WINDOW_MS) return null;
+    if (state.peerRounds >= peer.maxRounds) {
+      await audit('skip', 'banter_limit');
+      return null;
+    }
+    const job = {};
+    state.peerJob = job;
+    const release = () => { if (state.peerJob === job) state.peerJob = null; };
+    const expiresAt = anchor.receivedAt + PEER_BANTER_WINDOW_MS;
+    const current = () => state.peerJob === job && this.isLatest(anchor) && this.#clock() <= expiresAt && enabled();
+    let selected = false;
+    try {
+      await wait(this.#delay);
+      if (await state.interrupt || !current()) return null;
+      let turn;
+      let memory;
+      let verdict;
+      for (let attempt = 0; attempt <= MAX_PEER_RECHECKS; attempt++) {
+        const latest = state.rows.findLast((row) => row.role === 'participant');
+        if (!latest || !current()) return null;
+        turn = { speaker: latest.speaker, senderId: latest.senderId, text: latest.text };
+        const version = state.peerVersion;
+        memory = await recall?.(anchor, turn.text);
+        if (!current()) return null;
+        verdict = await this.#judge({ mode: 'peer_banter',
+          rounds: { used: state.peerRounds, limit: peer.maxRounds },
+          recent_messages: this.contextFor({ ...anchor, messageId: latest.messageId }),
+          ordinary_memory: memory ?? null, current: { role: 'participant', speaker: turn.speaker, text: turn.text } }, anchor);
+        if (!current()) return null;
+        if (state.peerVersion === version) break;
+        if (attempt === MAX_PEER_RECHECKS) return null;
+      }
+      if (verdict?.reply !== true) {
+        await audit('skip', 'semantic_no');
+        return null;
+      }
+      state.peerRounds += 1;
+      state.lastPeerBanterAt = this.#clock();
+      await audit('would_reply', 'semantic_yes');
+      selected = true;
+      return { anchor, peerTurn: turn, memory, current, release };
+    } catch {
+      await audit('skip', 'judge_error');
+      return null;
+    } finally {
+      if (!selected) release();
+    }
   }
 
-  noteReply(envelope, text) {
+  cancelPeer(envelope) {
+    const state = this.#groups.get(this.#key(envelope));
+    if (state) {
+      state.peerJob = null;
+      state.latestHuman = null;
+      state.lastPeerBanterAt = null;
+    }
+  }
+
+  noteReply(envelope, text, messageId) {
     if (this.#closed || envelope?.scope !== 'group') return;
     const state = this.#state(envelope);
     const now = this.#clock();
     state.botAt = now;
     state.botText = oneLine(text, 800);
     state.recipient = envelope.senderId;
-    state.rows.push({ at: now, role: 'assistant', speaker: 'cat', text: state.botText });
+    state.rows.push({ at: now, role: 'assistant', speaker: 'cat', text: state.botText, messageId });
     state.rows = state.rows.slice(-30);
+  }
+
+  noteOutbound(envelope, text) {
+    if (this.#closed || envelope.scope !== 'group') return;
+    const state = this.#state(envelope);
+    state.outbound.push({ at: this.#clock(), text: oneLine(plainQqMarkdown(text), 400) });
+    state.outbound = state.outbound.slice(-8);
   }
 
   isLatest(envelope) {
     return !this.#closed && envelope?.scope === 'group'
-      && this.#groups.get(this.#key(envelope))?.latestMessageId === envelope.messageId;
+      && this.#groups.get(this.#key(envelope))?.latestHuman?.messageId === envelope.messageId;
   }
 
   contextFor(envelope, since = 0) {

@@ -56,6 +56,8 @@ class MaomaoPanel extends TypertRemoteService {
         qq: qq?.ready ? 'ready' : (qq?.running ? 'waiting' : 'off'),
       },
       channelSetup: this.setup.status(),
+      qqDirectMessages: qq?.directMessages ?? { acceptStrangers: false, lastInbound: null },
+      qqPeerGroups: this.ctx.get('maomaoQq')?.peerGroups?.() ?? [],
       bindings: {
         private: privateStatus?.owners ?? [],
         qq: Number.isSafeInteger(qq?.panelRoutes) ? qq.panelRoutes : 0,
@@ -93,6 +95,16 @@ class MaomaoPanel extends TypertRemoteService {
   channelSetup(request) {
     requireOwner(this.ctx);
     return this.setup.request(request);
+  }
+
+  qqDirectMessageSettings(request) {
+    requireOwner(this.ctx);
+    return this.ctx.get('maomaoQq')?.saveDirectMessageSettings?.(request ?? {}) ?? { status: 'unavailable' };
+  }
+
+  qqPeerSettings(request) {
+    requireOwner(this.ctx);
+    return this.ctx.get('maomaoQq')?.savePeerGroup?.(request ?? {}) ?? { status: 'unavailable' };
   }
 
   chatModel(request, signal) {
@@ -186,7 +198,7 @@ class MaomaoPanel extends TypertRemoteService {
 }
 
 // Register the JavaScript method with Typert's source-mode discovery.
-for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'personas']) {
+for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'personas']) {
   Remote(MaomaoPanel.prototype[name], { name, addInitializer: (fn) => initializers.push(fn) });
 }
 

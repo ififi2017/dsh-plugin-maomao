@@ -87,13 +87,7 @@ function stripLeadingBotMention(message, text, botId) {
   return text;
 }
 
-function isPeerMention(mention, peer) {
-  if (!peer?.name || !mention || mention.is_you === true) return false;
-  return peer.memberId ? [mention.member_openid, mention.user_openid, mention.id].includes(peer.memberId)
-    : mention.bot !== false && [mention.nickname, mention.username].includes(peer.name);
-}
-
-export function normalizeInbound(message, receivedAt = Date.now(), botId = '', peer = null) {
+export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
   if (!message || !['group', 'c2c'].includes(message.kind) || message.senderIsBot === true) return null;
   const messageId = NON_EMPTY(message.messageId);
   const senderId = NON_EMPTY(message.senderId);
@@ -105,8 +99,6 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '', p
   const addressedToOther = message.kind === 'group' && !addressed && (
     (Array.isArray(message.mentions) && message.mentions.some((mention) => mention && mention.is_you !== true))
     || /<@!?[0-9A-Za-z]+>/.test(NON_EMPTY(message.content)));
-  const addressedToPeer = addressedToOther && Array.isArray(message.mentions) && message.mentions.length > 0
-    && message.mentions.every((mention) => isPeerMention(mention, peer));
   const attachments = normalizeAttachments(message.attachments);
   const replyIndex = NON_EMPTY(message.refMsgIdx).slice(0, 256);
   const scope = message.kind === 'group' ? 'group' : 'c2c';
@@ -126,7 +118,6 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '', p
     sentAt: NON_EMPTY(message.timestamp),
     addressed,
     addressedToOther,
-    addressedToPeer,
     text: (body
       .replace(/<faceType=\d+,faceId="[^"]*",ext="[^"]*">/g, '[QQ 表情]')
       || (/\[<face,id=\d+\/?>\]|<faceType=\d+,faceId=/.test(message.raw?.content ?? '') ? '[QQ 表情]' : ''))

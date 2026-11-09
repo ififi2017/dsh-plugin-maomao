@@ -49,10 +49,21 @@ test('QQ voice reuses only a delivered same-speaker voice, and falls back before
     get: (key) => key === 'maomaoModels' ? models : undefined },
     { statePath: join(root, 'state.json'), ordinary: { root: join(root, 'ordinary') },
       groupAllowlist: ['test-group', 'other-group'] },
-    { botFactory: () => bot, harness: { async ask(envelope, { voice }) {
+    { botFactory: () => bot, harness: { async ask(envelope, { voice, chatTools }) {
       voiceTurns.push(voice);
-      if (envelope.messageId === 'fallback') return '上传前故障';
-      return voice?.language === 'ja' ? 'おやすみ。' : '（轻声）晚安喵。';
+      const definitions = new Map();
+      const close = chatTools.bind('voice-session', { register(definition) {
+        definitions.set(definition.name, definition); return () => definitions.delete(definition.name);
+      } });
+      try {
+        // This fake LLM deliberately chooses based on the whole turn, not a connector classifier.
+        if (['other', 'other-group', 'deny'].includes(envelope.messageId)) return '好的，用文字回答。';
+        const text = envelope.messageId === 'japanese' ? 'おやすみ。' : envelope.messageId === 'fallback' ? '上传前故障' : '晚安喵。';
+        const outcome = await definitions.get('maomao_speak').execute({ text }, {
+          agent: { id: 'voice-session' }, signal: AbortSignal.timeout(2000), concludeTurn() {},
+        });
+        return outcome.status === 'unavailable' ? '这次语音没发出去，先给你文字版。' : 'duplicate';
+      } finally { close(); }
     } } });
   const deliver = async (messageId, content, senderId = 'member-a', groupOpenid = 'test-group', count = 1) => {
     const expected = sent.length + count;
@@ -69,11 +80,12 @@ test('QQ voice reuses only a delivered same-speaker voice, and falls back before
     await deliver('other-group', '用日语再来一下', 'member-a', 'other-group');
     await deliver('japanese', '用日语再来一下');
     assert.equal(voiceTurns[3].previous, '晚安喵。');
-    assert.equal(voiceTurns[3].language, 'ja');
+    assert.equal(voiceTurns[1], null);
+    assert.equal(voiceTurns[2], null);
     await deliver('deny', '不要用语音，再说一遍');
-    await deliver('fallback', '请用语音回复', 'member-a', 'test-group', 2);
+    await deliver('fallback', '请用语音回复', 'member-a', 'test-group', 1);
     await deliver('uncertain', '请用语音回复');
-    assert.deepEqual(sent.map((req) => req.msgType), [7, 0, 0, 7, 0, 0, 0, 7]);
+    assert.deepEqual(sent.map((req) => req.msgType), [7, 0, 0, 7, 0, 0, 7]);
     assert.match(sent[5].content, /文字版/);
     assert.deepEqual(synthesis, ['晚安喵。', 'おやすみ。', '上传前故障', '晚安喵。']);
   } finally {

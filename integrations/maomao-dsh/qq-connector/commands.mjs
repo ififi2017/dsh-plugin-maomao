@@ -42,9 +42,14 @@ export function qqPersonaReply(command, { book, target, owner }) {
   return `已切换为「${label(matches[0].name)}」，下一条消息会开启新对话。`;
 }
 
-export function sidReply(envelope) {
+export function sidReply(envelope, admission) {
   const lines = [`QQ 发送者 OpenID：${safeId(envelope.senderId)}`];
   if (envelope.scope === 'group') lines.push(`QQ群 OpenID：${safeId(envelope.chatId)}`);
+  if (envelope.scope === 'c2c' && admission) {
+    lines.push(`私聊授权：${admission.paired ? '已配对或加入白名单' : admission.acceptStrangers ? '允许陌生人聊天（尚未配对）' : '尚未配对'}`,
+      `主人身份：${admission.owner ? '已配置' : '未配置'}`,
+      '发送 /pair 查看配对方法。私聊授权不会自动绑定主人，也不共享其他渠道记忆。');
+  }
   return lines.join('\n');
 }
 

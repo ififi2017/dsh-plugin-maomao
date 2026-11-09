@@ -8,6 +8,7 @@
 | --- | --- |
 | `package.json`、`cordis.patch.yml` | DSH bundle 清单、设置页和内置 Agent 预设 |
 | `client.js`、`index.mjs` | 原生设置页和仅供实例所有者调用的面板服务 |
+| `integrations/maomao-dsh/chat-tools.mjs`、`voice-media.mjs` | 按轮挂载的聊天工具、返回状态与固定语音转码；新增能力复用连接器授权与发送回执 |
 | `integrations/maomao-dsh/private-connector/` | Telegram、Lark / 飞书连接器，私聊绑定与路由 |
 | `integrations/maomao-dsh/qq-connector/` | QQ 收发、接话判断与群级授权 |
 | `integrations/maomao-companion/` | 公共人设与本地记忆、预算、分享等 Python 组件 |
@@ -15,14 +16,14 @@
 
 ## 本地验证
 
-先安装依赖并运行 `npm test`。测试使用合成消息，不需要 Bot 凭据。发布包安装建议用隔离的 DSH home 验证，避免与日常实例的 Bot 连接重叠。
+先准备 Node.js `>=24.9`、Python 3、Pillow 和支持 `libopus` 的 FFmpeg，再安装依赖并运行 `npm test`。测试使用合成消息，不需要 Bot 凭据。发布包安装建议用隔离的 DSH home 验证，避免与日常实例的 Bot 连接重叠。
 
 ```sh
 npm ci --ignore-scripts
 npm test
 npm run pack:release
 export DSH_HOME="$(mktemp -d)"
-dsh plugin --profile web add ./maomao-dsh-panel-0.2.24.tgz
+dsh plugin --profile web add ./maomao-dsh-panel-0.2.25.tgz
 dsh --profile web --dump-config
 dsh web --host 127.0.0.1
 ```

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { GeminiImageGeneration, OpenAiImageGeneration, imageRequest } from '../image-generation.mjs';
+import { GeminiImageGeneration, OpenAiImageGeneration } from '../image-generation.mjs';
 import { MaomaoQqConnector } from '../index.mjs';
 import { apply as applyOrdinaryPolicy } from '../ordinary-policy.mjs';
 import { ConnectorState } from '../state.mjs';
@@ -52,9 +52,6 @@ test('a newly selected Gemini image model uses GenerateContent with the referenc
 });
 
 test('native image tool is bound to one admitted QQ turn and delivers only once', async () => {
-  assert.equal(imageRequest('帮我画一只橘猫'), true);
-  assert.equal(imageRequest('请把这张图变成漫画'), true);
-  assert.equal(imageRequest('不要画图，解释一下'), false);
   const root = await mkdtemp(join(tmpdir(), 'maomao-image-tool-'));
   const env = { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
     MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' };
@@ -70,12 +67,13 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
   let finishRun;
   let terminated = false;
   const tools = { register(value, options) {
-    assert.equal(value.name, 'qq_generate_image');
+    assert.equal(value.name, 'maomao_generate_image');
     definition = value;
     activation = options.when;
     return () => { definition = undefined; };
   } };
   const agent = { id: 'test-session', ctx: { get(name) {
+    if (name === 'systemPrompt') return { getSectionOrder: () => 0, section: () => () => {} };
     assert.equal(name, 'tools');
     return tools;
   } } };
@@ -99,21 +97,17 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
     async prompt(req) {
       try {
         promptCount += 1;
-        if (promptCount === 1) return;
-        assert.match(req.content[0].text, /上一次没有返回有效结果/);
-        const token = req.content[0].text.match(/token 是 ([a-f0-9-]+)/)[1];
-        const args = { token, prompt: '橘猫坐在月亮旁', aspect_ratio: '1:1', use_reference: true };
+        assert.match(req.content[0].text, /聊天工具/);
+        const args = { prompt: '橘猫坐在月亮旁', aspect_ratio: '1:1', use_reference: true };
         assert.equal(activation({ agent }), true);
         assert.equal(activation({ agent: { id: 'unrelated' } }), false);
-        assert.deepEqual(await definition.execute(args, { ...exec, agent: { id: 'unrelated' } }), { status: 'denied' });
-        assert.deepEqual(await definition.execute({ ...args, token: 'old-token' }, exec), { status: 'denied' });
-        assert.deepEqual(await definition.execute(args, exec), { status: 'sent' });
-        assert.deepEqual(await definition.execute(args, exec), { status: 'denied' });
+        assert.deepEqual(await definition.execute(args, { ...exec, agent: { id: 'unrelated' } }), { status: 'denied', data: '' });
+        assert.deepEqual(await definition.execute(args, exec), { status: 'sent', data: '' });
+        assert.deepEqual(await definition.execute(args, exec), { status: 'limit', data: '' });
         assert.ok(terminated);
       } catch (error) { rejectHandled(error); throw error; }
     },
     async wait() {
-      if (promptCount === 1) return { reason: 'idle', output: { records: [] } };
       resolveHandled(); return { reason: 'idle', output: { records: [
       { event: { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'duplicate' }] } } } },
     ] } }; },
@@ -129,10 +123,10 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
   try {
     await connector.start();
     await connector.accept({ kind: 'group', rawEventType: 'GROUP_AT_MESSAGE_CREATE', groupOpenid: 'group-a',
-      senderId: 'sender-a', messageId: 'message-a', content: '请把这张图变成漫画',
+      senderId: 'sender-a', messageId: 'message-a', content: '换成水彩风吧',
       attachments: [{ content_type: 'image/png', url: 'https://img.qpic.cn/test' }] });
     await handled;
-    assert.equal(promptCount, 2);
+    assert.equal(promptCount, 1);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].model, 'gemini-3.1-flash-image');
     assert.deepEqual(calls[0].input[1], { type: 'image', mime_type: 'image/png', data: png });

@@ -139,6 +139,30 @@ export class ConnectorState {
     return this.panelRoutes(botId).length;
   }
 
+  directMessageSettings(botId) {
+    return this.#data.directMessageSettings?.[digestOf(botId)] ?? null;
+  }
+
+  saveDirectMessageSettings(botId, settings) {
+    return this.#write((next) => {
+      next.directMessageSettings ??= {};
+      next.directMessageSettings[digestOf(botId)] = { acceptStrangers: settings.acceptStrangers };
+    });
+  }
+
+  peerSettings(botId, chatId) {
+    return this.#data.peerSettings?.[routeKey(botId, 'group', chatId)];
+  }
+
+  savePeerSettings(botId, chatId, settings) {
+    return this.#write((next) => {
+      next.peerSettings ??= {};
+      const key = routeKey(botId, 'group', chatId);
+      next.peerSettings[key] = { ...next.peerSettings[key], ...settings };
+      return next.peerSettings[key];
+    });
+  }
+
   panelRoutes(botId) {
     const account = digestOf(botId);
     const prefix = `${botId}:group:`;
@@ -147,14 +171,14 @@ export class ConnectorState {
     const known = new Map(observed.map((chatId) => [routeKey(botId, 'group', chatId), chatId]));
     return Object.entries(this.#data.panelRoutes ?? {}).filter(([, entry]) => (entry?.account ?? entry) === account)
       .map(([id, entry]) => ({ id, scope: entry?.scope ?? (known.has(id) ? 'group' : null),
-        groupOpenId: entry?.groupOpenId ?? known.get(id) }));
+        groupOpenId: entry?.groupOpenId ?? known.get(id), userOpenId: entry?.userOpenId }));
   }
 
   async allowPanelRoute(botId, scope, chatId) {
     return this.#write((next) => {
       next.panelRoutes ??= {};
       next.panelRoutes[routeKey(botId, scope, chatId)] = { account: digestOf(botId), scope,
-        ...(scope === 'group' ? { memory: groupMemory(botId, chatId), groupOpenId: chatId } : {}) };
+        ...(scope === 'group' ? { memory: groupMemory(botId, chatId), groupOpenId: chatId } : { userOpenId: chatId }) };
     });
   }
 
@@ -207,6 +231,7 @@ export class ConnectorState {
       }
       if ((entry?.account ?? entry) !== account) return false;
       delete next.panelRoutes[id];
+      if (next.peerSettings) delete next.peerSettings[id];
       for (const [key, owner] of Object.entries(next.panelOwners ?? {})) {
         if (owner.route === id && owner.account === account) delete next.panelOwners[key];
       }
@@ -244,7 +269,7 @@ export class ConnectorState {
     });
   }
 
-  async reserve(envelope, text) {
+  async reserve(envelope, text, { optional = false } = {}) {
     if (typeof text !== 'string' || !text.trim()) throw new TypeError('send text must be nonempty');
     const fingerprint = digestOf(text);
     const key = `${envelope.receiptKey}:${fingerprint}`;
@@ -252,14 +277,20 @@ export class ConnectorState {
       const prior = next.sends[key];
       if (prior) return { ...prior, fresh: false, key };
       const receipt = next.receipts[envelope.receiptKey];
-      const windowMs = envelope.scope === 'group' ? GROUP_REPLY_MS : 60_000;
+      // Official C2C reply window is 60 minutes (not 60 seconds). In particular,
+      // a user may spend a few minutes confirming pairing in the panel.
+      // https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md
+      const windowMs = envelope.scope === 'group' ? GROUP_REPLY_MS : 60 * 60_000;
       if (!receipt || receipt.botId !== envelope.botId
         || receipt.chatId !== envelope.chatId || receipt.messageId !== envelope.messageId
         || receipt.scope !== envelope.scope || this.#clock() - receipt.at > windowMs
         || this.#clock() < receipt.at) throw new Error('QQ reply anchor unavailable or expired');
       const max = envelope.scope === 'group' ? GROUP_REPLIES : 4;
       const count = sendCount(next, envelope.receiptKey);
-      if (count >= max) throw new Error('QQ passive reply budget exhausted');
+      if (count >= max) {
+        if (optional) return null;
+        throw new Error('QQ passive reply budget exhausted');
+      }
       const ticket = { seq: count + 1, at: this.#clock(), status: 'reserved', messageId: '' };
       next.sends[key] = ticket;
       return { ...ticket, fresh: true, key };

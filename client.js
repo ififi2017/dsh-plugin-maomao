@@ -9,6 +9,7 @@ window.__ModuleLoader__.load({
     const results = { unavailable: '暂不满足发送条件', shadow: '已模拟', denied: '请求被拒绝',
       cancelled: '已取消', uncertain: '投递待确认', sent: '已投递' };
     const destinations = { desktop: '桌面会话', feishu: 'Lark / 飞书', telegram: 'Telegram', qq: 'QQ' };
+    const platforms = ['feishu', 'telegram', 'qq'];
     const pairingTitles = { feishu: '绑定飞书 / Lark 私聊', telegram: '绑定 Telegram 私聊', qq: '绑定 QQ 群或私聊' };
     const mediaLabels = {
       ok: '下载成功', lark_permission: '缺少读取消息资源的权限（99991672），检查 im:message:readonly 和版本发布',
@@ -60,6 +61,80 @@ window.__ModuleLoader__.load({
       h('button', { type, style: dirty ? unsavedStyle : inputStyle, onClick, disabled }, label),
       h('span', { role: 'status', style: { fontWeight: 600 } }, dirty ? '未保存' : ''));
     const timestamp = (at) => new Date(at).toLocaleString('zh-CN');
+
+    const stackStyle = { display: 'grid', gap: 14, minWidth: 0 };
+    const mutedStyle = { margin: 0, fontSize: 13, opacity: 0.72, lineHeight: 1.65 };
+    const panelPages = {
+      home: ['总览', '先让猫猫聊起来，再按需开启更多能力。'],
+      channels: ['渠道与会话', '先连接 Bot，再授权聊天。主人身份和聊天权限分别管理。'],
+      personas: ['人设', '管理角色设定，以及每个群和私聊使用的角色。'],
+      models: ['模型与能力', '按用途选择模型。默认优先复用 DSH 保存的服务凭据。'],
+      memory: ['记忆', '查看猫猫记住的内容，管理记忆范围与检索。'],
+      activity: ['主动互动', '决定猫猫何时接话、何时主动来找你。'],
+      diagnostics: ['诊断', '按渠道检查收件、模型处理、投递和媒体下载。'],
+    };
+    const draftDestination = (key) => key.startsWith('channels:peer:') ? { view: 'activity', activityTab: 'groups' }
+      : key === 'memory:sharing' ? { view: 'activity', activityTab: 'sharing' }
+      : key.startsWith('models:credentials:') ? { view: 'models', modelTab: 'credentials' }
+      : key.startsWith('models:') ? { view: 'models', modelTab: key.slice(7) }
+      : key.startsWith('personas:') ? { view: 'personas', personaTab: 'library' }
+      : key.startsWith('memory:') ? { view: 'memory', memoryTab: 'settings' }
+      : { view: 'channels', platform: 'qq', channelTab: 'bindings' };
+    function Subnav({ label, value, options, onChange, dirty = () => false }) {
+      return h('nav', { 'aria-label': label, className: 'maomao-subnav' },
+        options.map(([id, title]) => h('button', { key: id, type: 'button', 'aria-pressed': value === id,
+          className: value === id ? 'selected' : '', onClick: () => onChange(id) }, title,
+          dirty(id) && h('span', { className: 'maomao-draft-dot', title: '未保存' }, ' · 未保存'))));
+    }
+    function Disclosure({ title, initial = false, forceOpen = false, children }) {
+      const [expanded, setOpen] = useState(initial);
+      const open = forceOpen || expanded;
+      return h('div', { style: stackStyle },
+        h('button', { type: 'button', style: { ...inputStyle, textAlign: 'left' }, 'aria-expanded': open,
+          onClick: () => setOpen(!open) }, `${open ? '▾' : '▸'} ${title}`),
+        h('div', { hidden: !open }, children));
+    }
+    const panelCss = `
+      .maomao-panel { container-type:inline-size; font-size:13px; line-height:1.55; }
+      .maomao-panel *, .maomao-panel *::before, .maomao-panel *::after { box-sizing:border-box; }
+      .maomao-panel [hidden] { display:none !important; }
+      .maomao-panel button { cursor:pointer; color:inherit; }
+      .maomao-panel button:disabled { cursor:default; opacity:.5; }
+      .maomao-panel button:focus-visible, .maomao-panel input:focus-visible,
+      .maomao-panel select:focus-visible, .maomao-panel textarea:focus-visible { outline:2px solid #8d77d5; outline-offset:3px; }
+      .maomao-panel textarea { width:100%; resize:vertical; line-height:1.65; }
+      .maomao-panel select { min-width:0; text-overflow:ellipsis; }
+      .maomao-layout { display:grid; grid-template-columns:142px minmax(0,1fr); gap:24px; align-items:start; }
+      .maomao-nav { display:grid; gap:18px; position:sticky; top:8px; }
+      .maomao-nav-group { display:grid; gap:4px; }
+      .maomao-nav-label { font-size:11px; opacity:.55; padding:0 10px 3px; }
+      .maomao-nav button { border:0; background:transparent; border-radius:9px; text-align:left; padding:9px 10px; font-size:13px; }
+      .maomao-nav button.selected { background:rgba(139,115,210,.14); font-weight:650; }
+      .maomao-nav button:hover, .maomao-subnav button:hover { background:rgba(139,115,210,.09); }
+      .maomao-subnav { display:flex; flex-wrap:wrap; gap:4px; border-bottom:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); padding-bottom:9px; }
+      .maomao-subnav button { font-size:13px; border:0; border-radius:7px; padding:6px 10px; background:transparent; }
+      .maomao-subnav button.selected { background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.12)); font-weight:650; }
+      .maomao-draft-dot { color:#b8791f; font-size:11px; }
+      .maomao-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr)); gap:10px; }
+      .maomao-channels { grid-template-columns:repeat(3,minmax(0,1fr)); }
+      @container (max-width:420px) { .maomao-channels { grid-template-columns:minmax(0,1fr); } }
+      .maomao-channel { border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); border-radius:12px; padding:13px; text-align:left; background:transparent; display:grid; gap:5px; }
+      .maomao-channel.selected { border-color:#9380c7; background:rgba(139,115,210,.08); }
+      .maomao-status { display:inline-flex; gap:6px; align-items:center; font-size:12px; }
+      .maomao-status::before { content:''; width:6px; height:6px; border-radius:50%; background:#999; }
+      .maomao-status.ready::before { background:#53a47c; }
+      .maomao-status.waiting::before { background:#c18b38; }
+      .maomao-main { display:grid; gap:16px; min-width:0; }
+      .maomao-binding { display:grid; gap:8px; padding:12px 0; border-bottom:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.2)); }
+      @container (max-width:700px) {
+        .maomao-layout { grid-template-columns:minmax(0,1fr); gap:18px; }
+        .maomao-nav { position:static; display:flex; gap:4px; flex-wrap:wrap; }
+        .maomao-nav-group { display:contents; }
+        .maomao-nav-label { display:none; }
+        .maomao-nav button { padding:7px 9px; }
+      }
+    `;
+
     const ownerSummary = ({ id, label, channels }) =>
       `${label} · ${channels.map((key) => destinations[key]).join('、')} · ${id.slice(-6)}`;
 
@@ -86,7 +161,7 @@ window.__ModuleLoader__.load({
       return [value, (next) => store.write(key, next), () => store.clear(key, value)];
     }
 
-    function ChannelWizard({ snapshot, invoke, onChange, platform, setPlatform }) {
+    function ChannelWizard({ snapshot, invoke, onChange, platform }) {
       const setup = snapshot.channelSetup[platform];
       const [mode, setMode] = useState('import');
       const [brand, setBrand] = useState(setup.brand);
@@ -141,16 +216,20 @@ window.__ModuleLoader__.load({
       const needsSecret = mode === 'import' || platform === 'telegram';
       const consoleLink = brand === 'lark' ? 'https://open.larksuite.com/app' : 'https://open.feishu.cn/app';
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '1. 连接 Bot'),
+        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '连接 Bot'),
         h('div', { style: lineStyle },
-          h('select', { 'aria-label': '连接渠道', value: platform, style: inputStyle, disabled: busy,
-            onChange: (event) => setPlatform(event.target.value) },
-          Object.entries(destinations).map(([key, label]) => h('option', { key, value: key }, label))),
           platform === 'feishu' && h('select', { 'aria-label': '飞书版本', value: brand, style: inputStyle,
             disabled: busy, onChange: (event) => setBrand(event.target.value) },
           h('option', { value: 'feishu' }, '飞书'), h('option', { value: 'lark' }, 'Lark')),
           h('span', null, states[snapshot.channels[platform]])),
-        setup.available ? h('div', { style: { display: 'grid', gap: 9 } },
+        setup.managed && h('div', { style: lineStyle },
+          button(setup.enabled ? '断开连接' : '重新连接', () => submit(setup.enabled ? 'disable' : 'enable'),
+            busy || (!setup.enabled && !exclusive)),
+          button('验证已保存的凭据', () => submit('test'), busy)),
+        setup.managed && !setup.enabled && h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: exclusive,
+          disabled: busy, onChange: (event) => setExclusive(event.target.checked) }), '确认没有其他实例连接这个 Bot'),
+        setup.available ? h(Disclosure, { key: `${platform}:${setup.managed}`, title: setup.managed ? '更换 Bot 或重新授权' : '配置连接', initial: !setup.managed, forceOpen: activeConnection(job) },
+        h('div', { style: { display: 'grid', gap: 12 } },
           h('div', { style: lineStyle },
             h('select', { 'aria-label': '连接方式', value: mode, style: inputStyle, disabled: busy,
               onChange: (event) => { setMode(event.target.value); setSecret(''); } },
@@ -173,19 +252,16 @@ window.__ModuleLoader__.load({
             button(mode === 'scan' ? '生成授权二维码' : '验证并连接', () => submit('start'),
               busy || !exclusive || (needsSecret && !secret.trim()) ||
               (mode === 'import' && platform !== 'telegram' && !account.trim())),
-            setup.managed && button(setup.enabled ? '断开连接' : '重新连接',
-              () => submit(setup.enabled ? 'disable' : 'enable'), busy || (!setup.enabled && !exclusive)),
-            setup.managed && button('验证已保存的凭据', () => submit('test'), busy),
             activeConnection(job) && job.state !== 'saving' && button('取消授权', () => submit('cancel'), sending)),
           job?.qr && h('div', { style: { display: 'grid', gap: 6, justifyItems: 'start' } },
             job.qr.image && h('img', { alt: '平台授权二维码', width: 210, height: 210, src: job.qr.image }),
             h('a', { href: job.qr.url, target: '_blank', rel: 'noreferrer' },
               job.qr.step === 'create' ? '打开 Telegram 创建 Bot' : '打开平台授权链接')),
-          job && h('p', { role: 'status', style: { margin: 0 } },
-            job.state === 'failed' ? (connectionErrors[job.reason] ?? '连接操作失败。') : connectionLabels[job.state]),
           platform === 'feishu' &&
-            h('a', { href: consoleLink, target: '_blank', rel: 'noreferrer' }, '在平台检查机器人权限、长连接事件和版本发布'))
-          : h('p', { style: { margin: 0 } }, connectionErrors.setup_missing));
+            h('a', { href: consoleLink, target: '_blank', rel: 'noreferrer' }, '在平台检查机器人权限、长连接事件和版本发布')))
+          : h('p', { style: { margin: 0 } }, connectionErrors.setup_missing),
+        job && h('p', { role: 'status', style: { margin: 0 } },
+            job.state === 'failed' ? (connectionErrors[job.reason] ?? '连接操作失败。') : connectionLabels[job.state]));
     }
 
     function BindingControls({ snapshot, invoke, onBound, platform, relink, closeRelink }) {
@@ -270,14 +346,14 @@ window.__ModuleLoader__.load({
       }
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
         h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, requestedRelink
-          ? `将 ${destinations[platform]} 私聊关联到同一主人` : `2. ${pairingTitles[platform]}`),
+          ? `将 ${destinations[platform]} 私聊关联到同一主人` : pairingTitles[platform]),
         requestedRelink && h('p', { style: { margin: 0 } },
           '确认后，这个私聊将使用所选主人的普通记忆，并开启新的会话上下文。原记忆保留在原档案中。'),
         online && h('div', { style: lineStyle },
           !pairing && (platform === 'qq'
             ? h('select', { 'aria-label': 'QQ 会话类型', value: scope, style: inputStyle, disabled: Boolean(pairing) || pending,
               onChange: (event) => setScope(event.target.value) },
-            h('option', { value: 'group' }, 'QQ群白名单'), h('option', { value: 'c2c' }, 'QQ 私聊白名单'),
+            h('option', { value: 'group' }, 'QQ群白名单'), h('option', { value: 'c2c' }, 'QQ 私聊'),
             h('option', { value: 'owner' }, 'QQ群主人身份'))
             : needsOwnerChoice && h('select', { 'aria-label': '主人及记忆归属', value: ownerChoice ? owner || 'new' : 'choose', style: inputStyle,
               disabled: pending, onChange: (event) => setOwner(event.target.value === 'new' ? '' : event.target.value) },
@@ -346,7 +422,7 @@ window.__ModuleLoader__.load({
         notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
     }
 
-    function BindingManagement({ entries = [], owners, invoke, onChange, canRelink, onRelink }) {
+    function BindingManagement({ entries = [], owners, platform, invoke, onChange, canRelink, onRelink }) {
       const [selected, setSelected] = useState(null);
       const [busy, setBusy] = useState(false);
       const [notice, setNotice] = useState('');
@@ -361,24 +437,101 @@ window.__ModuleLoader__.load({
       }
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
         h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '管理已绑定会话'),
-        h('p', { style: { margin: 0 } }, '这里显示所有渠道的面板绑定。上方的渠道选择用于连接和添加绑定。'),
+        h('p', { style: { margin: 0 } }, `这里只显示 ${destinations[platform]} 的绑定。配对允许聊天，主人身份决定称呼与私聊记忆归属。`),
         entries.length === 0 && h('p', { style: { margin: 0 } }, '暂无面板绑定。'),
-        ...entries.map((route, index) => h('div', { key: route.id, style: lineStyle },
+        ...entries.map((route) => h('div', { key: route.id, className: 'maomao-binding' },
           h('span', null, `${destinations[route.platform]} · ${route.platform === 'qq'
             ? ({ group: '群白名单', c2c: '私聊白名单', owner: '群主人身份' }[route.scope] ?? '会话')
             : owners.find((owner) => owner.id === route.ownerId)?.label ?? `主人 ${route.owner}`}`,
-          route.platform === 'qq' ? h('code', { style: { overflowWrap: 'anywhere' } },
-            route.groupOpenId ? `群 OpenID ${route.groupOpenId}` : `绑定 ID ${route.id.slice(-8)}`) : ` · ${index + 1}`),
-          selected === route.id
+          ` · ${(route.groupOpenId ?? route.userOpenId ?? route.id).slice(-8)}`),
+          h('details', null, h('summary', { style: { cursor: 'pointer', opacity: 0.7 } }, '查看完整标识'),
+            h('code', { style: { overflowWrap: 'anywhere', display: 'block', fontSize: 12 } }, route.groupOpenId ? `群 OpenID：${route.groupOpenId}`
+              : route.userOpenId ? `用户 OpenID：${route.userOpenId}` : `绑定 ID：${route.id}`)),
+          h('div', { style: lineStyle }, selected === route.id
             ? h(ReactFragment, null, button('确认解绑', () => remove(route), busy),
               button('取消解绑', () => setSelected(null), busy))
             : h(ReactFragment, null,
               canRelink(route) && button('关联同一主人', () => onRelink(route), busy),
-              button('解绑', () => { setNotice(''); setSelected(route.id); }, busy)))),
+              button('解绑', () => { setNotice(''); setSelected(route.id); }, busy))))),
         notice && h('p', { role: 'status', style: { margin: 0 } }, notice),
-        owners.length > 0 && h(ReactFragment, null,
+        owners.some(owner => owner.channels.includes(platform)) && h(ReactFragment, null,
           h('h4', { style: { margin: '8px 0 0' } }, '私聊主人与记忆归属'),
-          ...owners.map((owner) => h(OwnerName, { key: owner.id, owner, invoke, onChange }))));
+          ...owners.filter(owner => owner.channels.includes(platform)).map((owner) => h(OwnerName, { key: owner.id, owner, invoke, onChange }))));
+    }
+
+    function QqDirectMessages({ settings, online, invoke, onChange, drafts }) {
+      const [draft, setDraft, clearDraft] = useDraft(drafts, 'channels:qq-direct-messages');
+      const [busy, setBusy] = useState(false);
+      const [notice, setNotice] = useState('');
+      const value = draft ?? { acceptStrangers: settings.acceptStrangers === true };
+      async function save() {
+        setBusy(true);
+        try {
+          const result = await invoke('qqDirectMessageSettings', { request: value });
+          if (result.status === 'saved') { clearDraft(); onChange(); }
+          setNotice(result.status === 'saved' ? '私聊设置已保存，立即生效。' : '未能保存，请确认 QQ 连接器正在运行。');
+        } catch { setNotice('保存失败，请重试。'); }
+        finally { setBusy(false); }
+      }
+      const inbound = settings.lastInbound;
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, ...(draft ? unsavedStyle : {}) } },
+        h('h3', { style: { margin: 0 } }, 'QQ 私聊'),
+        h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.acceptStrangers,
+          disabled: busy || !online, onChange: (event) => setDraft(event.target.checked === settings.acceptStrangers ? undefined : { acceptStrangers: event.target.checked }) }), '接受陌生人私聊'),
+        h('p', { style: { margin: 0, fontSize: 13 } }, value.acceptStrangers
+          ? '开启后，未配对用户也能直接聊天并调用已启用的聊天工具，会产生模型用量。每个人使用独立的 QQ 私聊记忆，不会获得主人身份。'
+          : '关闭时，仅已配对或加入私聊白名单的用户可以聊天。未配对用户仍可发送 /sid 查询身份、/pair 查看配对步骤。'),
+        h('p', { style: { margin: 0, fontSize: 13 } }, '指定用户可通过「添加绑定 → QQ 私聊」配对。若这里仍开启，解绑后对方仍能作为陌生人聊天。'),
+        h('p', { role: 'status', style: { margin: 0, fontSize: 13 } }, inbound
+          ? `最近私聊收件：${inbound.outcome === 'admitted' ? '已准入' : '等待配对'} · ${timestamp(inbound.at)}`
+          : '本次启动后尚未收到私聊消息。若 /sid 没有回复，请确认发给了当前 Bot，以及 QQ 平台已开放单聊消息能力。'),
+        h('div', { style: lineStyle }, button('保存私聊设置', save, busy || !online || !draft),
+          draft && button('取消修改', clearDraft, busy)),
+        notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
+    }
+
+    function QqPeerSettings({ groups, invoke, onChange, drafts }) {
+      const [selected, select] = useState('');
+      const group = groups.find(({ id }) => id === selected) ?? groups[0];
+      if (!group) return null;
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
+        h('h3', { style: { margin: 0 } }, 'QQ 群互动'),
+        h('label', { style: lineStyle }, '选择群聊', h('select', { style: inputStyle, value: group.id,
+          onChange: (event) => select(event.target.value) },
+        groups.map(({ id, label }) => h('option', { key: id, value: id }, label)))),
+        h(QqPeerGroup, { key: group.id, group, invoke, onChange, drafts }));
+    }
+
+    function QqPeerGroup({ group, invoke, onChange, drafts }) {
+      const [draft, setDraft, clearDraft] = useDraft(drafts, `channels:peer:${group.id}`);
+      const [busy, setBusy] = useState(false);
+      const [notice, setNotice] = useState('');
+      const value = draft ?? group;
+      const update = (key, next) => setDraft({ ...value, [key]: next });
+      async function save() {
+        setBusy(true);
+        try {
+          const result = await invoke('qqPeerSettings', { request: value });
+          if (result.status === 'saved') { clearDraft(); onChange(); }
+          setNotice(result.status === 'saved' ? '已保存。'
+            : result.status === 'invalid' ? '请检查轮数设置。' : '当前群设置不可用。');
+        } catch { setNotice('保存失败，请重试。'); }
+        finally { setBusy(false); }
+      }
+      return h('div', { style: { display: 'grid', gap: 8 } },
+        h('p', { style: { margin: 0 } }, '模型会参考同群上下文和已启用的 QQ 普通记忆，判断是否接群里的话。'),
+        h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.enabled,
+          disabled: busy, onChange: (event) => update('enabled', event.target.checked) }), '启用群互动'),
+        h('label', { style: lineStyle }, '本机器人每轮话题最多续聊几次',
+          h('select', { value: value.maxRounds, style: draft ? unsavedStyle : inputStyle, disabled: busy,
+            onChange: (event) => update('maxRounds', Number(event.target.value)) },
+          [1, 2, 3, 4, 5].map((n) => h('option', { key: n, value: n }, n)))),
+        h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.paused,
+          disabled: busy, onChange: (event) => update('paused', event.target.checked) }), '暂停互动'),
+        h('p', { style: { margin: 0 } }, '群友可用 /停止互动 立即暂停。群主人可用 /恢复互动，或在这里取消暂停。'),
+        h('div', { style: lineStyle }, button('保存群互动设置', save, busy || !draft),
+          draft && button('取消修改', clearDraft, busy)),
+        notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
     }
 
     const replyCheckLabels = {
@@ -438,7 +591,7 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); }
       }
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '3. 验证第一条回复'),
+        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '验证聊天回复'),
         h('div', { style: lineStyle },
           h('span', null, ready ? 'Bot 已在线' : '等待 Bot 在线'),
           h('span', null, target ? '· 已有绑定会话' : '· 等待绑定会话')),
@@ -446,7 +599,7 @@ window.__ModuleLoader__.load({
           targets.length > 1 && h('select', { 'aria-label': '测试会话', style: inputStyle,
             disabled: busy, value: target, onChange: (event) => { setNotice(''); setSelected(event.target.value); } },
           targets.map((route) => h('option', { key: route.id, value: route.id }, platform === 'qq'
-            ? `${route.scope === 'group' ? 'QQ群' : 'QQ 会话'} · ${(route.groupOpenId ?? route.id).slice(-8)}`
+            ? `${route.scope === 'group' ? 'QQ群' : 'QQ 会话'} · ${(route.groupOpenId ?? route.userOpenId ?? route.id).slice(-8)}`
             : `${snapshot.bindings.private.find((owner) => owner.id === route.ownerId)?.label ?? `主人 ${route.owner}`} · ${route.id.slice(-8)}`))),
           button(checkText ? '生成新的测试消息' : '生成测试消息', start,
             busy || !ready || ['received', 'sending'].includes(check?.status))),
@@ -465,20 +618,43 @@ window.__ModuleLoader__.load({
         notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
     }
 
-    function QuickStart({ snapshot, openChannel, openModels }) {
-      return h('div', { style: { display: 'grid', gap: 12 } },
-        h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-          h('h3', { style: { margin: 0, fontSize: 15 } }, '在 DSH 里和猫猫聊'),
-          h('p', { style: { margin: 0 } }, '打开 DSH 新建会话，在模式菜单选择「猫猫」，发一句「猫猫你好」。桌面聊天无需绑定 Bot。')),
-        h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-          h('h3', { style: { margin: 0, fontSize: 15 } }, '接入聊天平台'),
-          h('p', { style: { margin: 0 } }, '先选一个平台，连接 Bot、绑定聊天，再验证第一条回复。'),
-          h('div', { style: lineStyle }, ...['feishu', 'telegram', 'qq'].map((platform) => h('div', { key: platform },
-            button(`${destinations[platform]} · ${states[snapshot.channels[platform]]}`, () => openChannel(platform)))))),
-        h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-          h('h3', { style: { margin: 0, fontSize: 15 } }, '对话模型'),
-          h('p', { style: { margin: 0 } }, '渠道对话可跟随 DSH 的默认模型。识图、生图、语音和向量检索可以之后按需开启。'),
-          h('div', null, button('查看或测试对话模型', openModels))));
+    function ChannelCards({ snapshot, selected, onSelect }) {
+      return h('div', { className: 'maomao-grid maomao-channels' }, platforms.map(platform => {
+        const count = snapshot.bindings.managed.filter(route => route.platform === platform && route.scope !== 'owner').length;
+        const state = snapshot.channels[platform];
+        return h('button', { key: platform, type: 'button', className: `maomao-channel${selected === platform ? ' selected' : ''}`,
+          'aria-pressed': selected === platform, onClick: () => onSelect(platform) },
+          h('strong', { style: { fontSize: 14 } }, destinations[platform]),
+          h('span', { className: `maomao-status ${state}` }, states[state]),
+          h('span', { style: { opacity: 0.65, fontSize: 12 } }, count ? `${count} 个已绑定会话` : '尚未绑定会话'));
+      }));
+    }
+
+    function QuickStart({ snapshot, openChannel, go }) {
+      const connected = platforms.filter(p => snapshot.channels[p] === 'ready').length;
+      const bound = snapshot.bindings.managed.filter(route => route.scope !== 'owner').length;
+      return h('div', { style: stackStyle },
+        h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
+          h('h3', { style: { margin: 0, fontSize: 16 } }, connected ? `${connected} 个渠道在线 · ${bound} 个聊天已绑定` : '先选一个聊天入口'),
+          h('p', { style: mutedStyle }, connected ? '日常调整从导航进入。新增平台时，只需完成连接、配对和回复验证。'
+            : '只在 DSH 桌面聊天，无需绑定 Bot；想在聊天软件里使用，就先连接一个渠道。'),
+          h('div', { style: lineStyle }, button('查看人设', () => go({ view: 'personas', personaTab: 'library' })),
+            button('选择对话模型', () => go({ view: 'models', modelTab: 'chat' })))),
+        h(ChannelCards, { snapshot, onSelect: openChannel }),
+        h('div', { className: 'maomao-grid' },
+          h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
+            h('h3', { style: { margin: 0, fontSize: 14 } }, '记忆'),
+            h('p', { style: mutedStyle }, `私聊记忆${snapshot.memory.private ? '已开启' : '未开启'} · QQ 记忆${snapshot.memory.qq ? '已开启' : '未开启'}`),
+            button('看看猫猫记住了什么', () => go({ view: 'memory', memoryTab: 'library' }))),
+          h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
+            h('h3', { style: { margin: 0, fontSize: 14 } }, '主动互动'),
+            h('p', { style: mutedStyle }, `私聊主动分享：${modes[snapshot.sharing.mode]}`),
+            button('调整接话与分享', () => go({ view: 'activity' })))),
+        h('details', null, h('summary', { style: { cursor: 'pointer' } }, '第一次使用？查看接入顺序'),
+          h('ol', { style: { paddingLeft: 22, display: 'grid', gap: 8 } },
+            h('li', null, '桌面聊天：新建 DSH 会话，在模式中选择「猫猫」。'),
+            h('li', null, '聊天平台：连接 Bot → 绑定群或私聊 → 测试回复。'),
+            h('li', null, '基础聊天可用后，再按需配置识图、生图、语音、记忆与主动互动。'))));
     }
 
     function SharePreview({ invoke }) {
@@ -554,7 +730,7 @@ window.__ModuleLoader__.load({
           [...groups].map(([provider, models]) => h('optgroup', { key: provider, label: mediaProviders[provider] ?? provider },
             models.map((model) => h('option', { key: key(model), value: key(model) }, model.name))))),
           button('测试对话模型', () => submit('test'), busy || (!choice && !catalog.default)),
-          saveControl('保存对话模型', () => submit('save'), busy || !catalog.available || (!choice && !catalog.default), choice !== savedChoice))
+          saveControl('保存对话模型', () => submit('save'), busy || !catalog.available || (!choice && !catalog.default) || choice === savedChoice, choice !== savedChoice))
           : !result && h('p', { role: 'status', style: { margin: 0 } }, '正在读取 Harness 模型目录…'),
         busy && h('p', { role: 'status', style: { margin: 0 } }, '正在处理模型设置…'),
         result && h('p', { role: 'status', style: { margin: 0, overflowWrap: 'anywhere' } },
@@ -564,13 +740,13 @@ window.__ModuleLoader__.load({
     const mediaRoles = { vision: '识图模型', image: '生图模型', voice: '语音模型', embedding: 'Embedding 模型' };
     const mediaUse = {
       vision: '用于 Lark / 飞书、Telegram 和 QQ 的聊天图片识别。',
-      image: '用于 QQ 聊天里的生图和图片投递。',
-      voice: '用于 QQ 聊天里的语音回复。',
+      image: '由模型在 QQ、Lark / 飞书、Telegram 对话中调用，生成并发送图片。',
+      voice: '由模型根据上下文选择语音回复。Lark / 飞书和 Telegram 需要本机安装 FFmpeg。',
       embedding: '用于私聊记忆向量检索，也可配合 QQ 记忆和表情库各自的开关。',
     };
     const mediaMessages = { invalid: '配置无效。', unavailable: '对应的模型服务未加载。', saved: '已保存，后续消息使用此设置。',
       test_failed: '模型未返回有效的测试结果，请检查凭据、权限和额度。', save_failed: '保存失败，原设置仍保留。',
-      credential_missing: '请先在本页配置该服务的 API Key。', credential_saved: '凭据已保存在 Harness 凭据库。',
+      credential_missing: '请先到「模型与能力 → 服务凭据」配置该服务的 API Key。', credential_saved: '凭据已保存在 Harness 凭据库。',
       credential_rejected: '服务拒绝了当前凭据，请换一个有效的 API Key。', rate_limit: '服务暂时限流，请稍后重试。' };
 
     function MediaModelCard({ entry, voices, invoke, onChange, drafts }) {
@@ -657,7 +833,7 @@ window.__ModuleLoader__.load({
             setManual(!manual); setResult(null);
           }, !!busy),
           button(role === 'voice' ? '生成试听' : `测试${title}`, () => submit('test'), !!busy || !selection.model.trim()),
-          saveControl(`保存${title}`, () => submit('save'), !!busy || !draft.model, dirty)),
+          saveControl(`保存${title}`, () => submit('save'), !!busy || !draft.model || !dirty, dirty)),
         discovery && h('p', { role: 'status', style: { margin: 0 } }, discovery.map(({ provider, status, models }) =>
           `${mediaProviders[provider]} ${status === 'ok' || status === 'partial'
             ? `找到 ${models.length} 个候选${status === 'partial' ? '（列表不完整）' : ''}`
@@ -672,8 +848,9 @@ window.__ModuleLoader__.load({
           : h('img', { src: preview, alt: '生图模型测试预览', style: { width: '100%', maxWidth: 240, borderRadius: 8 } })));
     }
 
-    function MediaCredential({ provider, configured, source, writable, invoke, refresh }) {
-      const [secret, setSecret] = useState('');
+    function MediaCredential({ provider, configured, source, writable, invoke, refresh, drafts }) {
+      const [secretDraft, setSecret, clearSecret] = useDraft(drafts, `models:credentials:${provider}`);
+      const secret = secretDraft ?? '';
       const [result, setResult] = useState('');
       const [busy, setBusy] = useState(false);
       const label = { google: 'Google Gemini', openai: 'OpenAI', openrouter: 'OpenRouter' }[provider];
@@ -682,7 +859,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await invoke('mediaModel', { request: { action: 'credential', provider, secret: secret.trim() } });
           setResult(value.status);
-          if (value.status === 'credential_saved') { setSecret(''); refresh(); }
+          if (value.status === 'credential_saved') { clearSecret(); refresh(); }
         } catch { setResult('save_failed'); }
         finally { setBusy(false); }
       }
@@ -690,12 +867,12 @@ window.__ModuleLoader__.load({
         h('div', { style: lineStyle }, h('span', null, `${label} · ${source === 'harness' ? '复用 DSH 凭据'
           : source === 'maomao' ? '使用猫猫专用凭据' : configured ? '已配置' : '未配置'}`),
           h('input', { 'aria-label': `${label} API Key`, type: 'password', autoComplete: 'off', style: inputStyle,
-            value: secret, onChange: (event) => setSecret(event.target.value), disabled: !writable || busy }),
+            value: secret, onChange: (event) => setSecret(event.target.value || undefined), disabled: !writable || busy }),
           saveControl(`保存 ${label} 凭据`, save, !writable || busy || !secret.trim(), !!secret.trim())),
         result && h('p', { role: 'status', style: { margin: 0 } }, mediaMessages[result]));
     }
 
-    function MediaModels({ invoke, onChange, drafts }) {
+    function MediaModels({ invoke, onChange, drafts, selected }) {
       const [catalog, setCatalog] = useState(null);
       const [failed, setFailed] = useState(false);
       const refresh = useCallback(() => {
@@ -704,26 +881,13 @@ window.__ModuleLoader__.load({
       useEffect(refresh, [refresh]);
       if (!catalog) return h('p', { role: 'status' }, failed ? '模型配置读取失败。' : '正在读取媒体模型设置…');
       return h(ReactFragment, null,
-        h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
+        selected === 'credentials' && h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
           h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '模型服务凭据'),
           ...Object.keys(catalog.credentials).map((provider) => h(MediaCredential, { key: provider,
             provider, configured: catalog.credentials[provider], source: catalog.credentialSources?.[provider],
-            writable: catalog.writable, invoke, refresh })),
-          h('p', { style: { margin: 0 } }, '测试使用固定样例。识图适用于已连接的聊天，语音和生图投递当前用于 QQ。')),
-        ...catalog.entries.map((entry) => h(MediaModelCard, { key: entry.role, entry, voices: catalog.voices, invoke, onChange, drafts })));
-    }
-
-    function ModelSettings({ invoke, onChange, drafts }) {
-      const [advanced, setAdvanced] = useState(() =>
-        Object.keys(drafts.read()).some((key) => key.startsWith('models:') && key !== 'models:chat'));
-      return h(ReactFragment, null,
-        h(ChatModels, { invoke, drafts }),
-        h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-          h('h3', { style: { margin: 0, fontSize: 14 } }, '可选功能'),
-          h('p', { style: { margin: 0 } }, '识图、生图、语音和记忆向量检索都可以等基础聊天能用之后再配置。'),
-          h('div', null, h('button', { type: 'button', style: inputStyle, 'aria-expanded': advanced,
-            onClick: () => setAdvanced(!advanced) }, advanced ? '收起可选模型' : '展开可选模型'))),
-        advanced && h(MediaModels, { invoke, onChange, drafts }));
+            writable: catalog.writable, invoke, refresh, drafts })),
+          h('p', { style: { margin: 0 } }, '已配置的 DSH 凭据会自动复用；只在需要单独使用其他账号时填写。未保存的输入仅暂存在本次运行内存中，退出 DSH 后清除。')),
+        ...catalog.entries.filter(entry => entry.role === selected).map((entry) => h(MediaModelCard, { key: entry.role, entry, voices: catalog.voices, invoke, onChange, drafts })));
     }
 
     function EmbeddingIndex({ invoke }) {
@@ -744,7 +908,7 @@ window.__ModuleLoader__.load({
         await poll(action);
         setBusy(false);
       }
-      const messages = { disabled: '在模型页启用 Embedding 后可重建索引。', no_bindings: '当前没有已绑定的私聊。',
+      const messages = { disabled: '在「模型与能力 → 向量检索」启用后可重建索引。', no_bindings: '当前没有已绑定的私聊。',
         failed: '重建中断，已写入的向量保留，可重试。', cancelled: '已取消，已写入的向量保留。',
         running: '正在重建…', done: '重建完成。', ready: '当前向量索引' };
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
@@ -793,12 +957,12 @@ window.__ModuleLoader__.load({
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
         h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, title),
         children(value, set, state === 'saving'),
-        saveControl(`保存${title}`, save, !initial.available || state === 'saving', draft !== undefined),
+        saveControl(`保存${title}`, save, !initial.available || state === 'saving' || !draft, draft !== undefined),
         state && h('p', { role: 'status', style: { margin: 0 } },
           state === 'saving' ? '正在保存…' : preferenceMessages[state]));
     }
 
-    function MemorySettings({ invoke, onChange, drafts }) {
+    function MemorySettings({ invoke, onChange, drafts, section = 'memory' }) {
       const [settings, setSettings] = useState(null);
       const [failed, setFailed] = useState(false);
       useEffect(() => {
@@ -812,17 +976,17 @@ window.__ModuleLoader__.load({
       const checkbox = (label, checked, set, disabled) => h('label', { style: lineStyle },
         h('input', { type: 'checkbox', checked, disabled, onChange: (event) => set(event.target.checked) }), label);
       return h(ReactFragment, null,
-        h(PreferenceCard, { title: '私聊记忆', section: 'privateMemory', initial: settings.privateMemory, invoke, onChange, drafts },
+        section === 'memory' && h(PreferenceCard, { title: '私聊记忆', section: 'privateMemory', initial: settings.privateMemory, invoke, onChange, drafts },
           (value, set, busy) => h(ReactFragment, null,
             checkbox('启用普通私聊记忆', value.enabled, (checked) => set('enabled', checked), busy),
             checkbox('同一主人在飞书 / Lark 和 Telegram 共享普通记忆', value.shared, (checked) => set('shared', checked), busy || !value.enabled),
-            h('p', { style: { margin: 0 } }, '两个私聊需要在「渠道」绑定到同一位主人。关闭共享后两端各自记录，已存的共享记忆仍会保留。'))),
-        h(PreferenceCard, { title: 'QQ 独立记忆', section: 'qqMemory', initial: settings.qqMemory, invoke, onChange, drafts },
+            h('p', { style: { margin: 0 } }, '两个私聊需要在「渠道与会话」绑定到同一位主人。关闭共享后两端各自记录，已存的共享记忆仍会保留。'))),
+        section === 'memory' && h(PreferenceCard, { title: 'QQ 独立记忆', section: 'qqMemory', initial: settings.qqMemory, invoke, onChange, drafts },
           (value, set, busy) => h(ReactFragment, null,
             checkbox('启用 QQ 独立记忆', value.enabled, (checked) => set('enabled', checked), busy),
             checkbox('在启用 QQ 表情库时使用 Embedding 检索', value.stickerEmbedding,
               (checked) => set('stickerEmbedding', checked), busy))),
-        h(PreferenceCard, { title: '主动分享设置', section: 'sharing', initial: settings.sharing, invoke, onChange, drafts },
+        section === 'sharing' && h(PreferenceCard, { title: '主动分享设置', section: 'sharing', initial: settings.sharing, invoke, onChange, drafts },
           (value, set, busy) => h(ReactFragment, null,
             h('div', { style: lineStyle },
               h('select', { 'aria-label': '主动分享模式', value: value.mode, style: inputStyle, disabled: busy,
@@ -833,8 +997,8 @@ window.__ModuleLoader__.load({
               h('select', { 'aria-label': '主动分享目标', value: value.target, style: inputStyle,
                 disabled: busy || value.mode === 'off', onChange: (event) => set('target', event.target.value) },
               h('option', { value: '' }, '选择已验证的私聊'),
-              value.targets.map((target, index) => h('option', { key: target.id, value: target.id },
-                `${destinations[target.platform]} · ${target.label ?? `主人 ${target.owner}`} · ${index + 1}`)))),
+              value.targets.map((target) => h('option', { key: target.id, value: target.id },
+                `${destinations[target.platform]} · ${target.label ?? `主人 ${target.owner}`} · ${target.id.slice(-8)}`)))),
             !value.targets.length && h('p', { style: { margin: 0 } }, '配对后先在目标私聊发一条普通消息，即可在这里选中。'),
             checkbox('寂寞小猫', value.lonely, (checked) => set('lonely', checked), busy),
             checkbox('后台浏览', value.browse, (checked) => set('browse', checked), busy),
@@ -890,7 +1054,7 @@ window.__ModuleLoader__.load({
         h('p', { style: { margin: 0 } }, '按桌面会话、私聊主人或 QQ 群查看已保存的记忆。'),
         sourceError && h('p', { role: 'alert', style: { margin: 0 } }, '记忆范围读取失败，请刷新。'),
         !sourceError && !sources && h('p', { role: 'status', style: { margin: 0 } }, '正在读取记忆范围…'),
-        sources?.length === 0 && h('p', { style: { margin: 0 } }, '还没有可查看的记忆范围。先到「渠道」绑定私聊或 QQ 群。'),
+        sources?.length === 0 && h('p', { style: { margin: 0 } }, '还没有可查看的记忆范围。先到「渠道与会话」绑定私聊或 QQ 群。'),
         selected && h('form', { style: lineStyle, onSubmit: (event) => { event.preventDefault(); change({ query: draft.trim() }); } },
           h('select', { style: inputStyle, 'aria-label': '记忆范围', value: filters.sourceId,
             onChange: (event) => change({ sourceId: event.target.value }) },
@@ -929,9 +1093,9 @@ window.__ModuleLoader__.load({
           button('下一页', () => change({ page: filters.page + 1 }), (filters.page + 1) * data.pageSize >= data.total)));
     }
 
-    function PersonaSettings({ invoke, revision, drafts }) {
+    function PersonaSettings({ invoke, revision, drafts, section }) {
       const [data, setData] = useState(null);
-      const [editedId, setEditedId] = useState('');
+      const [editedId, setEditedId] = useState('maomao');
       const [storedDraft, setDraft, clearDraft] = useDraft(drafts, 'personas:editor');
       const [targetId, setTargetId] = useState('');
       const [busy, setBusy] = useState(false);
@@ -974,13 +1138,13 @@ window.__ModuleLoader__.load({
       const currentPersona = data?.personas.find(({ id }) => id === (target?.personaId ?? data.defaultGroup));
       const options = (data?.personas ?? []).map(({ id, name }) => h('option', { key: id, value: id }, name));
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 15 } }, '人格管理'),
+        h('h3', { style: { margin: 0, fontSize: 15 } }, section === 'library' ? '角色库' : '会话使用的人设'),
         h('p', { style: { margin: 0 } }, '猫猫是内置人格。你可以添加角色设定，并为每个 QQ 群或已绑定的私聊单独选择。'),
-        data && h('label', { style: lineStyle }, '新 QQ 群默认人格',
+        section === 'assignments' && data && h('label', { style: lineStyle }, '新 QQ 群默认人格',
           h('select', { style: inputStyle, value: data.defaultGroup, disabled: busy,
             onChange: (event) => change({ action: 'default', personaId: event.target.value }) }, options)),
-        data && h('p', { style: { margin: 0 } }, '新群默认只用于之后接入的群。已有会话可在下面单独切换。'),
-        target ? h('div', { style: { display: 'grid', gap: 8 } },
+        section === 'assignments' && data && h('p', { style: mutedStyle }, '切换后立即生效。新群默认只用于之后接入的群。'),
+        section === 'assignments' && (target ? h('div', { style: { display: 'grid', gap: 8 } },
           h('label', { style: lineStyle }, '选择会话',
             h('select', { style: inputStyle, value: target.id, disabled: busy,
               onChange: (event) => setTargetId(event.target.value) },
@@ -991,23 +1155,24 @@ window.__ModuleLoader__.load({
                 onChange: (event) => change({ action: 'select', targetId: target.id, personaId: event.target.value }) }, options)),
             button('重开此会话', () => change({ action: 'reset', targetId: target.id }), busy)),
           h('p', { style: { margin: 0 } }, '切换人格或重开会从新的对话上下文开始，已保存的长期记忆会保留。'))
-          : data && h('p', { style: { margin: 0 } }, '还没有绑定的群或私聊。可在「渠道」中接入。'),
-        currentPersona && h('label', { style: { display: 'grid', gap: 5 } }, `当前角色设定 · ${currentPersona.name}`,
+          : data && h('p', { style: { margin: 0 } }, '还没有绑定的群或私聊。可在「渠道与会话」中接入。')),
+        section === 'assignments' && currentPersona && h('label', { style: { display: 'grid', gap: 5 } }, `当前角色设定 · ${currentPersona.name}`,
           h('textarea', { style: inputStyle, rows: 6, readOnly: true, value: currentPersona.prompt })),
-        data && h('form', { style: { display: 'grid', gap: 8 }, onSubmit: (event) => {
+        section === 'library' && data && h('form', { style: { display: 'grid', gap: 8 }, onSubmit: (event) => {
           event.preventDefault();
           void change({ action: 'save', ...draft }, () => { setEditedId(''); clearDraft(); });
         } },
           h('label', { style: lineStyle }, '编辑角色',
             h('select', { style: inputStyle, value: draft.personaId, disabled: busy || dirty,
               onChange: (event) => setEditedId(event.target.value) }, h('option', { value: '' }, '添加新角色'),
-            data.personas.filter(({ id }) => id !== 'maomao').map(({ id, name }) => h('option', { key: id, value: id }, name)))),
+            data.personas.map(({ id, name }) => h('option', { key: id, value: id }, name)))),
           h('label', { style: lineStyle }, '角色名称', h('input', { style: inputStyle, value: draft.name,
-            disabled: busy, required: true, maxLength: 40, onChange: (event) => edit({ name: event.target.value }) })),
+            disabled: busy || draft.personaId === 'maomao', required: true, maxLength: 40, onChange: (event) => edit({ name: event.target.value }) })),
           h('label', { style: { display: 'grid', gap: 5 } }, '角色设定', h('textarea', { style: inputStyle, value: draft.prompt,
-            rows: 4, required: true, disabled: busy, maxLength: 5000, placeholder: '描述角色的身份、说话风格和性格',
+            rows: 9, required: true, readOnly: draft.personaId === 'maomao', disabled: busy, maxLength: 5000, placeholder: '描述角色的身份、说话风格和性格',
             onChange: (event) => edit({ prompt: event.target.value }) })),
-          saveControl('保存角色', undefined, busy, dirty, 'submit'),
+          draft.personaId === 'maomao' ? h('p', { style: mutedStyle }, '猫猫是内置人设，只读。选择「添加新角色」即可创建自己的角色。')
+            : saveControl('保存角色', undefined, busy || !dirty, dirty, 'submit'),
           dirty && h('div', null, button('撤销本次编辑', () => { setEditedId(draft.personaId); clearDraft(); }, busy))),
         h('p', { role: 'status', style: { margin: 0 } }, message || (data ? '' : '正在读取人格设置…')));
     }
@@ -1021,49 +1186,52 @@ window.__ModuleLoader__.load({
             h('dd', { style: { margin: 0, textAlign: 'end', overflowWrap: 'anywhere' } }, value)))));
     }
 
-    function Panel({ invoke, drafts }) {
+    function Panel({ invoke, drafts, navigation }) {
       const [revision, refresh] = useState(0);
-      const [platform, setPlatform] = useState('feishu');
-      const [view, setView] = useState('home');
       const [preferred, setPreferred] = useState(null);
       const [relink, setRelink] = useState(null);
       const [state, setState] = useState({ pending: true });
+      const location = useSyncExternalStore(navigation.subscribe, navigation.read).location ?? {};
+      const view = Object.hasOwn(panelPages, location.view) ? location.view : 'home';
+      const platform = platforms.includes(location.platform) ? location.platform : 'feishu';
+      const channelTab = location.channelTab ?? 'connection';
+      const modelTab = location.modelTab ?? 'chat';
+      const memoryTab = location.memoryTab ?? 'library';
+      const personaTab = location.personaTab ?? 'assignments';
+      const activityTab = location.activityTab ?? 'groups';
+      const diagnosticPlatform = location.diagnosticPlatform ?? 'qq';
+      const go = (patch) => navigation.write('location', { ...(navigation.read().location ?? {}), ...patch });
       const draftKeys = Object.keys(useSyncExternalStore(drafts.subscribe, drafts.read));
       const hasDrafts = draftKeys.length > 0;
+      const dirtyPage = (page) => draftKeys.some(key => draftDestination(key).view === page);
       useEffect(() => {
         if (!hasDrafts) return;
         const warn = (event) => { event.preventDefault(); event.returnValue = ''; };
         window.addEventListener('beforeunload', warn);
         return () => window.removeEventListener('beforeunload', warn);
       }, [hasDrafts]);
-      const onChange = useCallback(() => refresh((value) => value + 1), []);
+      const onChange = useCallback(() => refresh(value => value + 1), []);
       useEffect(() => {
         const cancel = new AbortController();
-        setState((previous) => ({ ...previous, pending: true, error: null }));
-        invoke('status', {}, cancel.signal).then((snapshot) => {
+        setState(previous => ({ ...previous, pending: true, error: null }));
+        invoke('status', {}, cancel.signal).then(snapshot => {
           if (!cancel.signal.aborted) setState({ snapshot, pending: false });
         }).catch(() => {
-          if (!cancel.signal.aborted) setState((previous) =>
-            ({ ...previous, pending: false, error: '状态读取失败，请刷新重试。' }));
+          if (!cancel.signal.aborted) setState(previous => ({ ...previous, pending: false, error: '状态读取失败，请刷新重试。' }));
         });
         return () => cancel.abort();
       }, [revision, invoke]);
       const snapshot = state.snapshot;
-      const canRelink = (route) => route.platform !== 'qq' && snapshot.channels[route.platform] === 'ready'
-        && snapshot.bindings.private.some((owner) => owner.id !== route.ownerId
+      const canRelink = route => route.platform !== 'qq' && snapshot.channels[route.platform] === 'ready'
+        && snapshot.bindings.private.some(owner => owner.id !== route.ownerId
           && owner.channels.includes(route.platform === 'feishu' ? 'telegram' : 'feishu'));
-      const openRelink = (route) => {
-        setPlatform(route.platform);
-        setRelink(route);
-        setView('channels');
+      const openRelink = route => { setRelink(route); go({ platform: route.platform, view: 'channels', channelTab: 'bindings' }); };
+      const openChannel = value => {
+        setRelink(null);
+        go({ platform: value, view: 'channels', channelTab: snapshot?.channels[value] === 'ready' ? 'bindings' : 'connection' });
       };
-      const selectPlatform = (value) => { setRelink(null); setPlatform(value); };
-      const openChannel = (value) => { selectPlatform(value); setView('channels'); };
-      const openModels = () => setView('models');
-      const onBound = (route) => {
-        if (route) setPreferred(route);
-        onChange();
-      };
+      const openModels = () => go({ view: 'models', modelTab: 'chat' });
+      const onBound = route => { if (route) setPreferred(route); onChange(); };
       const relinkTargets = snapshot?.bindings.managed.filter(canRelink) ?? [];
       const awaitingConnection = snapshot && Object.values(snapshot.channels).includes('waiting');
       useEffect(() => {
@@ -1072,78 +1240,101 @@ window.__ModuleLoader__.load({
         const end = setTimeout(() => clearInterval(poll), 90_000);
         return () => { clearInterval(poll); clearTimeout(end); };
       }, [awaitingConnection, onChange]);
+      const channelRoutes = snapshot?.bindings.managed.filter(route => route.platform === platform) ?? [];
       const last = snapshot?.sharing.last;
-      const views = { home: '开始使用', channels: '渠道', personas: '人格', models: '模型', memoryLibrary: '记忆库', memory: '记忆与主动分享', diagnostics: '诊断' };
-      return h('div', { style: { display: 'grid', gap: 14, padding: '4px 0 16px', color: 'var(--dsw-alias-label-primary)' } },
-        h('div', { style: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 } },
-          h('div', null,
-            h('h2', { style: { margin: 0, fontSize: 18, fontWeight: 650 } }, '猫猫控制面板'),
-            h('p', { style: { margin: '5px 0 0', fontSize: 13, opacity: 0.75 } }, '当前 Harness 实例的连接与功能状态')),
-          h('button', { type: 'button', disabled: state.pending, onClick: () => refresh((value) => value + 1),
-            style: { ...sectionStyle, padding: '5px 10px', fontSize: 13, whiteSpace: 'nowrap' } }, '刷新')),
+      const pageHeader = h('div', null, h('h2', { style: { margin: '0 0 5px', fontSize: 19, fontWeight: 650 } }, panelPages[view][0]),
+        h('p', { style: mutedStyle }, panelPages[view][1]));
+      return h('div', { className: 'maomao-panel', style: { display: 'grid', gap: 18, padding: '4px 0 20px', color: 'var(--dsw-alias-label-primary)' } },
+        h('style', null, panelCss),
+        h('header', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 } },
+          h('div', { style: lineStyle }, h(CatIcon, { size: 26 }),
+            h('strong', { style: { fontSize: 16 } }, '猫猫'), h('span', { style: { opacity: 0.6, fontSize: 12 } }, '控制面板')),
+          button(state.pending ? '刷新中…' : '刷新状态', onChange, state.pending)),
         state.error && h('p', { role: 'alert', style: { margin: 0 } }, state.error),
-        state.pending && !snapshot && h('p', { role: 'status', style: { margin: 0 } }, '正在读取状态…'),
-        snapshot && h('nav', { 'aria-label': '猫猫面板设置', style: lineStyle },
-          Object.entries(views).map(([name, label]) => h('button', { key: name, type: 'button', style: {
-            ...inputStyle, fontWeight: view === name ? 700 : 400,
-            background: view === name ? 'var(--dsw-alias-fill-secondary)' : 'transparent',
-          }, 'aria-pressed': view === name, onClick: () => setView(name) },
-          draftKeys.some((key) => key.startsWith(`${name}:`)) ? `${label} · 未保存` : label))),
-        hasDrafts && h('p', { role: 'status', style: { ...sectionStyle, margin: 0, fontSize: 13 } },
-          '有未保存的设置。切页或关闭设置后可以继续编辑，退出或重新载入 DSH 前请先保存。'),
-        snapshot && h('div', { 'aria-busy': state.pending, style: { display: 'grid', gap: 12 } },
-          view === 'home' && h(QuickStart, { snapshot, openChannel, openModels }),
-          h('div', { style: view === 'channels' ? { display: 'grid', gap: 12 } : { display: 'none' } },
-            h(StatusCard, { title: '渠道连接', rows: [
-              ['Lark / 飞书', states[snapshot.channels.feishu]], ['Telegram', states[snapshot.channels.telegram]],
-              ['QQ', states[snapshot.channels.qq]],
-            ] }),
-            h(ChannelWizard, { key: platform, snapshot, invoke, onChange, platform, setPlatform: selectPlatform }),
-            relink ? h(BindingControls, { key: relink.id, snapshot, invoke, platform, relink,
-              closeRelink: () => setRelink(null),
-              onBound: () => { setRelink(null); setView('memory'); onChange(); } })
-              : h(ReactFragment, null,
-                h(BindingControls, { key: `binding-${platform}`, snapshot, invoke, onBound, platform }),
-                h(FirstReply, { key: `first-reply-${platform}`, snapshot, invoke, platform, preferred, openModels }),
-                h(BindingManagement, { entries: snapshot.bindings.managed, owners: snapshot.bindings.private,
-                  invoke, onChange, canRelink, onRelink: openRelink }))),
-          view === 'diagnostics' && h(StatusCard, { title: '媒体下载诊断', rows: Object.entries(destinations).map(([key, label]) => {
-            const check = snapshot.media[key];
-            return [label, check ? `${mediaLabels[check.outcome]} · ${timestamp(check.at)}` : '暂无下载记录'];
-          }) }),
-          view === 'diagnostics' && Object.entries(destinations).map(([key, label]) => h(StatusCard, { key,
-            title: `${label} 最近处理`, rows: Object.entries({ receive: '收件', reply: '投递', model: '对话模型' }).map(([kind, name]) => {
-              const event = snapshot.diagnostics?.[key]?.[kind];
-              return [name, event ? `${{ ok: '成功', empty: '未返回文本', failed: '失败' }[event.outcome]} · ${timestamp(event.at)}` : '暂无记录'];
-            }) })),
-          view === 'diagnostics' && h('div', { style: lineStyle },
-            ...Object.entries(destinations).filter(([key]) => snapshot.channels[key] === 'waiting'
-              || (snapshot.media[key] && snapshot.media[key].outcome !== 'ok') || snapshot.diagnostics?.[key]?.reply?.outcome === 'failed')
-              .map(([key, label]) => h('button', { key, type: 'button', style: inputStyle,
-              onClick: () => { selectPlatform(key); setView('channels'); } }, `检查 ${label} 连接与权限`)),
-            Object.values(snapshot.diagnostics ?? {}).some((entry) => entry.model?.outcome === 'failed')
-              && button('检查模型配置', () => setView('models'))),
-          view === 'models' && h(ModelSettings, { invoke, onChange, drafts }),
-          view === 'personas' && h(PersonaSettings, { invoke, revision, drafts }),
-          view === 'memoryLibrary' && h(MemoryView, { invoke, revision }),
-          view === 'memory' && h(StatusCard, { title: '记忆', rows: [
-            ['私聊普通记忆', enabled(snapshot.memory.private)],
-            ['飞书 / Lark 与 Telegram 共享记忆', sharedMemoryStates[snapshot.memory.sharedState] ?? enabled(snapshot.memory.shared)],
-            ['私聊 Embedding', enabled(snapshot.memory.embedding)], ['QQ 独立记忆', enabled(snapshot.memory.qq)],
-          ] }),
-          view === 'memory' && snapshot.memory.sharedState === 'waiting_owner' && relinkTargets.length > 0
-            && h('div', null, button('去绑定同一主人', () => {
-              const target = relinkTargets.find((route) => route.platform === platform) ?? relinkTargets[0];
-              openRelink(target);
-            })),
-          view === 'memory' && h(MemorySettings, { invoke, onChange, drafts }),
-          view === 'memory' && h(EmbeddingIndex, { invoke }),
-          view === 'memory' && h(StatusCard, { title: '主动分享', rows: [
-            ['运行模式', modes[snapshot.sharing.mode]], ['目标渠道', destinations[snapshot.sharing.destination] ?? '未设置'],
-            ['寂寞小猫', enabled(snapshot.sharing.lonely)], ['后台浏览', enabled(snapshot.sharing.browse)],
-            ['最近一次检查', last ? [results[last.status], timestamp(last.at)].join(' · ') : '尚无记录'],
-          ] }),
-          view === 'memory' && h(SharePreview, { invoke })));
+        !snapshot && h('p', { role: 'status', style: { margin: 0 } }, '正在读取状态…'),
+        snapshot && h('div', { className: 'maomao-layout' },
+          h('nav', { className: 'maomao-nav', 'aria-label': '猫猫面板设置' },
+            [['开始', ['home', 'channels']], ['管理', ['personas', 'models', 'memory']], ['运行', ['activity', 'diagnostics']]].map(([title, pages]) =>
+              h('div', { key: title, className: 'maomao-nav-group' }, h('div', { className: 'maomao-nav-label' }, title),
+                pages.map(name => h('button', { key: name, type: 'button', className: view === name ? 'selected' : '',
+                  'aria-pressed': view === name, onClick: () => go({ view: name }) }, panelPages[name][0],
+                  dirtyPage(name) && h('span', { className: 'maomao-draft-dot' }, ' · 未保存')))))),
+          h('main', { className: 'maomao-main', 'aria-label': panelPages[view][0], 'aria-busy': state.pending },
+            pageHeader,
+            hasDrafts && h('div', { role: 'status', style: { ...sectionStyle, borderColor: '#b8791f', background: 'rgba(224,154,30,.08)', display: 'grid', gap: 6 } },
+              h('span', null, '有未保存的修改，切页不会丢失。退出 DSH 前请保存。'),
+              h('div', { style: lineStyle }, [...new Set(draftKeys.map(key => draftDestination(key).view))].map(page =>
+                h('button', { key: page, type: 'button', style: inputStyle,
+                  onClick: () => go(draftDestination(draftKeys.find(key => draftDestination(key).view === page))) }, `继续编辑${panelPages[page][0]}`)))),
+            view === 'home' && h(QuickStart, { snapshot, openChannel, go }),
+            h('div', { hidden: view !== 'channels', style: stackStyle },
+              h(ChannelCards, { snapshot, selected: platform, onSelect: openChannel }),
+              h(Subnav, { label: '渠道配置步骤', value: channelTab,
+                options: [['connection', '1 连接 Bot'], ['bindings', '2 会话与权限'], ['test', '3 测试回复']],
+                onChange: channelTab => go({ channelTab }), dirty: id => id === 'bindings' && dirtyPage('channels') }),
+              h('div', { hidden: channelTab !== 'connection' },
+                h(ChannelWizard, { key: platform, snapshot, invoke, onChange, platform })),
+              h('div', { hidden: channelTab !== 'bindings', style: stackStyle },
+                h(BindingManagement, { key: `management-${platform}`, entries: channelRoutes, owners: snapshot.bindings.private,
+                  platform, invoke, onChange, canRelink, onRelink: openRelink }),
+                relink ? h(BindingControls, { key: relink.id, snapshot, invoke, platform, relink,
+                  closeRelink: () => setRelink(null), onBound: () => { setRelink(null); onChange(); } })
+                  : h(Disclosure, { key: `add-${platform}-${channelRoutes.length}`, title: '添加绑定', initial: !channelRoutes.length },
+                    h(BindingControls, { key: `binding-${platform}`, snapshot, invoke, onBound, platform })),
+                platform === 'qq' && h(QqDirectMessages, { settings: snapshot.qqDirectMessages ?? {},
+                  online: snapshot.channels.qq === 'ready', invoke, onChange, drafts }),
+                h('details', null, h('summary', { style: { cursor: 'pointer' } }, '连接、配对和主人有什么区别？'),
+                  h('p', { style: mutedStyle }, '连接让 Bot 上线；配对允许这个群或私聊聊天；主人绑定决定身份与普通私聊记忆归属。QQ 的聊天授权不等于主人身份，QQ 记忆也不与其他平台合并。'))),
+              h('div', { hidden: channelTab !== 'test' },
+                h(FirstReply, { key: `first-reply-${platform}`, snapshot, invoke, platform, preferred, openModels }))),
+            view === 'personas' && h(ReactFragment, null,
+              h(Subnav, { label: '人设管理', value: personaTab, options: [['assignments', '会话分配'], ['library', '角色库']],
+                onChange: personaTab => go({ personaTab }), dirty: id => id === 'library' && dirtyPage('personas') }),
+              h(PersonaSettings, { invoke, revision, drafts, section: personaTab })),
+            view === 'models' && h(ReactFragment, null,
+              h(Subnav, { label: '模型用途', value: modelTab, options: [['chat', '对话'], ['vision', '识图'], ['image', '生图'], ['voice', '语音'], ['embedding', '向量检索'], ['credentials', '服务凭据']],
+                onChange: modelTab => go({ modelTab }), dirty: id => draftKeys.some(key => key === `models:${id}` || key.startsWith(`models:${id}:`)) }),
+              modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
+            view === 'memory' && h(ReactFragment, null,
+              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['library', '记忆内容'], ['settings', '范围与共享'], ['index', '向量索引']],
+                onChange: memoryTab => go({ memoryTab }), dirty: id => id === 'settings' && dirtyPage('memory') }),
+              memoryTab === 'library' && h(MemoryView, { invoke, revision }),
+              memoryTab === 'settings' && h(ReactFragment, null,
+                h(StatusCard, { title: '当前记忆范围', rows: [['私聊普通记忆', enabled(snapshot.memory.private)],
+                  ['Lark / 飞书与 Telegram 共享', sharedMemoryStates[snapshot.memory.sharedState] ?? enabled(snapshot.memory.shared)],
+                  ['QQ 独立记忆', enabled(snapshot.memory.qq)]] }),
+                snapshot.memory.sharedState === 'waiting_owner' && relinkTargets.length > 0 && button('关联同一主人', () => openRelink(relinkTargets[0])),
+                h(MemorySettings, { invoke, onChange, drafts, section: 'memory' })),
+              memoryTab === 'index' && h(ReactFragment, null, h(EmbeddingIndex, { invoke }),
+                h('div', null, button('配置向量模型', () => go({ view: 'models', modelTab: 'embedding' }))))),
+            view === 'activity' && h(ReactFragment, null,
+              h(Subnav, { label: '主动互动类型', value: activityTab, options: [['groups', 'QQ 群接话'], ['sharing', '私聊主动分享']],
+                onChange: activityTab => go({ activityTab }), dirty: id => draftKeys.some(key => {
+                  const destination = draftDestination(key); return destination.view === 'activity' && destination.activityTab === id;
+                }) }),
+              activityTab === 'groups' ? h(ReactFragment, null,
+                snapshot.qqPeerGroups?.length ? h(QqPeerSettings, { groups: snapshot.qqPeerGroups, invoke, onChange, drafts })
+                  : h('section', { style: { ...sectionStyle, ...stackStyle } }, h('p', { style: mutedStyle }, '先绑定一个 QQ 群，再设置它的接话轮数与暂停状态。'),
+                    h('div', null, button('去绑定 QQ 群', () => openChannel('qq')))))
+                : h(ReactFragment, null,
+                  h(StatusCard, { title: '分享状态', rows: [['运行模式', modes[snapshot.sharing.mode]], ['目标渠道', destinations[snapshot.sharing.destination] ?? '未设置'],
+                    ['最近一次检查', last ? [results[last.status], timestamp(last.at)].join(' · ') : '尚无记录']] }),
+                  h(MemorySettings, { invoke, onChange, drafts, section: 'sharing' }),
+                  h(SharePreview, { invoke }))),
+            view === 'diagnostics' && h(ReactFragment, null,
+              h(Subnav, { label: '诊断渠道', value: diagnosticPlatform, options: platforms.map(key => [key, destinations[key]]),
+                onChange: diagnosticPlatform => go({ diagnosticPlatform }) }),
+              h(StatusCard, { title: `${destinations[diagnosticPlatform]} 最近处理`, rows: [
+                ['渠道状态', states[snapshot.channels[diagnosticPlatform]]],
+                ...Object.entries({ receive: '收件', model: '对话模型', reply: '投递' }).map(([kind, name]) => {
+                  const event = snapshot.diagnostics?.[diagnosticPlatform]?.[kind];
+                  return [name, event ? `${{ ok: '成功', empty: '未返回文本', failed: '失败' }[event.outcome]} · ${timestamp(event.at)}` : '暂无记录'];
+                }),
+                ['媒体下载', snapshot.media[diagnosticPlatform] ? `${mediaLabels[snapshot.media[diagnosticPlatform].outcome]} · ${timestamp(snapshot.media[diagnosticPlatform].at)}` : '暂无记录'],
+              ] }),
+              h('div', { style: lineStyle }, button('检查渠道连接', () => { setRelink(null); go({ view: 'channels', platform: diagnosticPlatform, channelTab: 'connection' }); }),
+                button('验证聊天回复', () => { setRelink(null); go({ view: 'channels', platform: diagnosticPlatform, channelTab: 'test' }); }),
+                button('检查对话模型', openModels))))));
     }
 
     function CatIcon({ size }) {
@@ -1157,6 +1348,7 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'connection'],
       apply(ctx) {
         const drafts = createDrafts();
+        const navigation = createDrafts();
         const invoke = async (method, args = {}, signal) => {
           const result = await ctx.connection.rpc.call('/api', `maomaoPanel/${method}`, { args }, signal);
           if (!result.ok) throw new Error('Maomao status unavailable');
@@ -1164,7 +1356,7 @@ window.__ModuleLoader__.load({
         };
         ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section', id: 'maomao', order: 60, label: () => '猫猫',
-          inject: () => ({ invoke, drafts }),
+          inject: () => ({ invoke, drafts, navigation }),
         }, Panel));
         ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
           name: 'settings.section.icon', id: 'maomao', label: () => '猫猫',

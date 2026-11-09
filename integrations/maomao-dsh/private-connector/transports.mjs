@@ -125,6 +125,17 @@ export class TelegramTransport {
     return Number.isSafeInteger(result?.message_id) ? String(result.message_id) : null;
   }
 
+  async replyMedia(event, media, _ticket, signal, current = () => true) {
+    if (!current() || signal.aborted) return null;
+    const voice = media.kind === 'voice';
+    const form = new FormData();
+    form.set('chat_id', event.chatId);
+    form.set('reply_parameters', JSON.stringify({ message_id: Number(event.messageId) }));
+    form.set(voice ? 'voice' : 'photo', new Blob([media.buffer], { type: media.mediaType }), media.fileName);
+    const sent = await this.#call(voice ? 'sendVoice' : 'sendPhoto', form, signal, 30_000);
+    return positiveId(sent?.message_id) ? String(sent.message_id) : null;
+  }
+
   async replyChoices(event, text, options, token, ticket, signal) {
     let result;
     try {
@@ -273,6 +284,31 @@ export class FeishuTransport {
     const result = await response.json().catch(() => null);
     return response.ok && result?.code === 0 && typeof result.data?.message_id === 'string'
       ? result.data.message_id : null;
+  }
+
+  async replyMedia(event, media, ticket, signal, current = () => true) {
+    const voice = media.kind === 'voice';
+    const token = await this.#accessToken(signal);
+    if (!current() || signal.aborted) return null;
+    const form = new FormData();
+    if (voice) {
+      form.set('file_type', 'opus');
+      form.set('file_name', 'maomao-voice.opus');
+    } else form.set('image_type', 'message');
+    form.set(voice ? 'file' : 'image', new Blob([media.buffer], { type: media.mediaType }), voice ? 'maomao-voice.opus' : media.fileName);
+    const upload = await this.#fetch(`${LARK_ORIGINS[this.#brand]}/open-apis/im/v1/${voice ? 'files' : 'images'}`, {
+      method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}` },
+      body: form, signal: bounded(signal, 30_000),
+    });
+    const payload = await upload.json().catch(() => null);
+    const key = voice ? 'file_key' : 'image_key';
+    if (!upload.ok || payload?.code !== 0 || typeof payload.data?.[key] !== 'string') return null;
+    if (!current() || signal.aborted) return null;
+    const response = await this.#request(`/${event.messageId}/reply`, {
+      msg_type: voice ? 'audio' : 'image', content: JSON.stringify({ [key]: payload.data[key] }), uuid: ticket.slice(0, 40),
+    }, signal);
+    const sent = await response.json().catch(() => null);
+    return response.ok && sent?.code === 0 && typeof sent.data?.message_id === 'string' ? sent.data.message_id : null;
   }
 
   async replyChoices(event, text, options, token, ticket, signal) {

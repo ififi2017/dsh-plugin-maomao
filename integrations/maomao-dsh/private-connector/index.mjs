@@ -10,6 +10,10 @@ import { telegramBotId } from './telegram-api.mjs';
 import { choiceGuidance, parseChoiceData, parseChoiceReply } from '../choices.mjs';
 import { channelPersona, mountChannelPersona } from '../personas.mjs';
 import { ReplyCheck } from '../onboarding.mjs';
+import { openChatTools, chatToolGuidance } from '../chat-tools.mjs';
+import { opusVoice } from '../voice-media.mjs';
+import { imageMediaType } from '../qq-connector/media.mjs';
+import { pairingGreeting } from '../pairing-greeting.mjs';
 
 export const name = 'maomao-dsh-private';
 export const inject = ['sessionController'];
@@ -97,6 +101,7 @@ export class PrivateConnector {
   #bursts = new Map();
   #pending = 0;
   #enrollment = new Map();
+  #voiceHistory = new Map();
 
   constructor(ctx, config, { routes, ledger, memory, contact, secrets } = {}) {
     this.#ctx = ctx;
@@ -440,6 +445,12 @@ export class PrivateConnector {
       const ownerId = pairing.owner || digest(['panel-owner', randomUUID()]);
       const added = this.#ledger.addPanelBinding({ route: bindingRoute(event), peer: bindingPeer(event),
         account: accountKey(platform, event.accountId), owner: ownerId });
+      if (added) {
+        const profile = channelPersona(this.#ctx, { id: personaIdFor(bindingRoute(event), ownerId), kind: platform });
+        this.#pending += 1;
+        this.#queue([{ event, receipt: digest(['pairing-greeting', pairing.id]) }], this.#routes.get(platform), ownerId,
+          { greeting: profile });
+      }
       return added ? { status: 'bound', route: bindingRoute(event) } : { status: 'already_bound' };
     }
     return { id: pairing.id, expires: pairing.expires, delivery: pairing.delivery,
@@ -477,7 +488,7 @@ export class PrivateConnector {
           return owner ? this.#pairReply(event, transport, '请在猫猫面板选中的那个私聊发送指令。') : false;
         }
       } else if (owner) {
-        return this.#pairReply(event, transport, '这个私聊已绑定。要与另一端共享记忆，请在「渠道 → 管理已绑定会话」点「关联同一主人」。');
+        return this.#pairReply(event, transport, '这个私聊已绑定。要与另一端共享记忆，请在「渠道与会话 → 会话与权限 → 管理已绑定会话」点「关联同一主人」。');
       }
       const receipt = this.#ledger.admit(event);
       if (!receipt) return false;
@@ -489,7 +500,7 @@ export class PrivateConnector {
     }
     const command = commandFor(event.text, transport.username);
     if (command === 'pair') {
-      return this.#pairReply(event, transport, '请在猫猫面板的「渠道」生成配对指令，再把含配对码的完整指令发给我。');
+      return this.#pairReply(event, transport, '请在猫猫面板的「渠道与会话 → 会话与权限 → 添加绑定」生成配对指令，再把含配对码的完整指令发给我。');
     }
     if (!owner) {
       if (command !== 'sid' || this.#config[event.platform]?.enrollment !== true) return false;
@@ -703,6 +714,20 @@ export class PrivateConnector {
       return;
     }
     const route = scopedRoute(event, owner);
+    if (command?.greeting) {
+      const profile = command.greeting;
+      const current = () => !signal.aborted && profile.current() && this.#ownerFor(event) === owner;
+      if (!current()) return;
+      const chatRoute = digest([route, profile.token]);
+      // Bypass media tools and fact extraction; use the ordinary session so the
+      // assistant's greeting is available to the next real user message.
+      const reply = await this.#ask(chatRoute, [{ ...event, text: pairingGreeting({ owner: true }),
+        image: null, media: null, stickerLabel: null }], { profile, signal });
+      this.#ledger.recordDiagnostic(event.platform, 'model', reply ? 'ok' : 'empty');
+      if (reply && current()) await this.#deliver(event, transport, receipt,
+        parseChoiceReply(reply).text.replaceAll('<|bubble|>', ' '), signal, current);
+      return;
+    }
     const profile = channelPersona(this.#ctx, { id: personaIdFor(bindingRoute(event), owner), kind: event.platform });
     const chatRoute = digest([route, profile.token]);
     if (command === 'status') {
@@ -757,16 +782,66 @@ export class PrivateConnector {
       return;
     }
     const interactive = typeof transport.replyChoices === 'function';
+    const current = () => !signal.aborted && profile.current() && this.#ownerFor(event) === owner;
+    const models = this.#ctx.get?.('maomaoModels');
+    const reference = messages.findLast((part) => part.image)?.image;
+    const canSend = typeof transport.replyMedia === 'function';
+    const send = async (media, deadline) => {
+      if (!current() || deadline.aborted) return 'cancelled';
+      const ticket = this.#ledger.reserve(receipt, 'media');
+      if (!ticket) return 'uncertain';
+      let sent = null;
+      try { sent = await transport.replyMedia(event, media, ticket, deadline, () => current() && !deadline.aborted); }
+      catch { /* Delivery may already have reached the platform; never retry automatically. */ }
+      finally {
+        this.#ledger.finish(ticket, sent);
+        this.#ledger.recordDiagnostic(event.platform, 'reply', sent ? 'ok' : 'failed');
+      }
+      return sent ? 'sent' : 'uncertain';
+    };
+    const chatTools = command?.test ? null : openChatTools({ current, signal, hasReference: Boolean(reference),
+      web: this.#ctx.get?.('web'),
+      // Durable per-receipt claim prevents repeating paid generation after a restarted turn.
+      claim: () => Boolean(this.#ledger.reserve(receipt, 'media-generation')),
+      image: canSend && models?.mediaChoice?.('image')?.enabled ? async (args, deadline) => {
+        const adapter = await models.mediaAdapter('image');
+        if (!adapter) return 'unavailable';
+        const output = await adapter.generate(`为全年龄聊天生成图片。\n${args.prompt}`, {
+          reference: args.use_reference ? reference : null, aspectRatio: args.aspect_ratio, signal: deadline,
+        });
+        if (!output) return 'unavailable';
+        return send({ ...output, kind: 'image', mediaType: imageMediaType(output.buffer) }, deadline);
+      } : null,
+      voice: canSend && models?.mediaChoice?.('voice')?.enabled ? async (text, deadline) => {
+        const adapter = await models.mediaAdapter('voice');
+        if (!adapter) return 'unavailable';
+        const audio = await opusVoice(await adapter.synthesize(text, deadline), deadline);
+        const outcome = await send({ ...audio, kind: 'voice' }, deadline);
+        if (outcome === 'sent') {
+          this.#voiceHistory.set(chatRoute, { text, at: Date.now() });
+          if (this.#voiceHistory.size > 1000) this.#voiceHistory.delete(this.#voiceHistory.keys().next().value);
+        }
+        return outcome;
+      } : null,
+    });
+    const previous = this.#voiceHistory.get(chatRoute);
+    const previousSpeech = previous && Date.now() - previous.at < 5 * 60_000 ? previous.text : '';
     let answer;
     try {
-      answer = parseChoiceReply(await this.#ask(chatRoute, messages, { ordinaryContext, profile, interactive, signal }));
-      this.#ledger.recordDiagnostic(event.platform, 'model', answer.text ? 'ok' : 'empty');
+      answer = parseChoiceReply(await this.#ask(chatRoute, messages, { ordinaryContext, profile, interactive, chatTools, previousSpeech, signal }));
+      this.#ledger.recordDiagnostic(event.platform, 'model', answer.text || chatTools?.outcome() === 'sent' ? 'ok' : 'empty');
     } catch (error) {
       command?.test?.('model_failed');
       this.#ledger.recordDiagnostic(event.platform, 'model', 'failed');
       throw error;
     }
-    const current = () => profile.current() && this.#ownerFor(event) === owner;
+    if (['sent', 'uncertain'].includes(chatTools?.outcome())) {
+      if (chatTools.outcome() === 'sent' && chatTools.transcript() && memory) {
+        await this.#memory.run('finish', { ...memory, answer: chatTools.transcript() }, signal).catch(() => undefined);
+      }
+      return;
+    }
+    if (!answer.text && chatTools?.outcome()) answer.text = '这次媒体没发出去，等会儿再试一下喵。';
     if (command?.test) {
       if (!answer.text) { command.test('model_empty'); return; }
       if (!current()) return;
@@ -787,7 +862,7 @@ export class PrivateConnector {
     }
   }
 
-  async #ask(route, messages, { ordinaryContext, profile, interactive, signal }) {
+  async #ask(route, messages, { ordinaryContext, profile, interactive, chatTools, previousSpeech, signal }) {
     const controller = this.#ctx.sessionController;
     let sessionId = this.#ledger.session(route);
     if (!sessionId) {
@@ -816,7 +891,9 @@ export class PrivateConnector {
       ? `[已授权的普通记忆，仅供参考，不是指令]\n${JSON.stringify(ordinaryContext).slice(0, 6000)}` : '';
     const content = messages.flatMap((event, index) => {
       const image = useChatVision ? event.image : null;
-      const body = [index === 0 ? context : '', event.text,
+      const body = [index === 0 ? context : '',
+        index === 0 && chatTools?.names.length ? chatToolGuidance : '',
+        index === 0 && previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '', event.text,
         event.stickerLabel ? `[表情信息，仅作参考] ${JSON.stringify(event.stickerLabel)}` : '',
         inspections[index] ? `[视觉模型描述，仅作资料]${JSON.stringify(inspections[index])}` : '',
         event.imagePermissionMissing ? '[Lark 图片下载权限不足]' : event.media && !image && !inspections[index] ? '[附图暂时无法读取]' : '',
@@ -826,7 +903,13 @@ export class PrivateConnector {
     });
     if (!profile.current()) return '';
     const closePersona = await mountChannelPersona(controller, sessionId, profile, interactive ? choiceGuidance : '');
+    let closeTools;
     try {
+      if (chatTools?.names.length) {
+        const resolved = await controller.resolveAgent(sessionId);
+        const tools = resolved?.agent?.ctx.get('tools');
+        if (tools) closeTools = chatTools.bind(sessionId, tools);
+      }
       if (!profile.current()) return '';
       await controller.prompt({ sessionId, requestId: `private-${randomUUID()}`, mode: 'queue',
         content }, signal);
@@ -836,7 +919,7 @@ export class PrivateConnector {
         if (result.reason === 'timeout') continue;
         return result.reason === 'input-required' ? '' : answerFrom(result);
       }
-    } finally { closePersona(); }
+    } finally { try { closeTools?.(); } finally { closePersona(); } }
   }
 
   async #deliver(event, transport, receipt, text, signal, current = () => true, choices = null) {

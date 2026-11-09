@@ -23,7 +23,6 @@ from maomao_companion.dialogue import DialogueStore  # noqa: E402
 from maomao_companion.library import MemeStore, collection_reply, image_input  # noqa: E402
 from maomao_companion.embeddings import OpenRouterEmbeddings, embedding_client  # noqa: E402
 from maomao_companion.budget import BudgetedEmbeddings, OutboundBudget  # noqa: E402
-from maomao_companion.delivery import requested_language, voice_denied, voice_followup, voice_requested  # noqa: E402
 
 PACK = {
     "A2": ("赞同", "中，可以，猫猫比 OK"),
@@ -122,12 +121,15 @@ class OrdinaryService:
 
     def media(self, op, envelope, args):
         _, scope, sender, message_id, path = self._scope(envelope)
-        if op == "voice_intent":
-            text = envelope["text"]
-            requested = voice_requested(text)
-            return {"requested": requested, "followup": not requested and not voice_denied(text) and voice_followup(text),
-                    "language": requested_language(text)}
-        _, gallery = self._stores(path, scope)
+        store, gallery = self._stores(path, scope)
+        if op == "peer_context":
+            query = args["query"][:400].strip()
+            speaker = _digest(sender)[:12]
+            context = store.context(scope, f"[群成员 {speaker}] {query}")
+            topic = context.get("topic")
+            if isinstance(topic, dict) and topic.get("speaker_id") not in (None, "", speaker):
+                context["topic"] = None
+            return context
         if op == "vision_claim":
             return {"allowed": any(item.get("kind") == "image" for item in envelope["attachments"]) and gallery.reserve("vision", 80)}
         model = self.embedding

@@ -6,7 +6,9 @@ export const telegramError = (code) => Object.assign(new Error(code), { code });
 
 export async function telegramCall(token, method, data, signal, { fetchImpl = fetch, ms = 12_000 } = {}) {
   const response = await fetchImpl(`https://api.telegram.org/bot${token}/${method}`, {
-    method: 'POST', redirect: 'error', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data),
+    method: 'POST', redirect: 'error',
+    headers: data instanceof FormData ? {} : { 'content-type': 'application/json' },
+    body: data instanceof FormData ? data : JSON.stringify(data),
     signal: AbortSignal.any([signal, AbortSignal.timeout(ms)]),
   }).catch(() => { throw telegramError('telegram_network'); });
   const body = await response.json().catch(() => null);
