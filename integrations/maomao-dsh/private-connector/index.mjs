@@ -800,7 +800,7 @@ export class PrivateConnector {
       return sent ? 'sent' : 'uncertain';
     };
     const chatTools = command?.test ? null : openChatTools({ current, signal, hasReference: Boolean(reference),
-      web: this.#ctx.get?.('web'),
+      web: this.#ctx.get?.('web'), browser: this.#ctx.get?.('maomaoBrowser'),
       // Durable per-receipt claim prevents repeating paid generation after a restarted turn.
       claim: () => Boolean(this.#ledger.reserve(receipt, 'media-generation')),
       image: canSend && models?.mediaChoice?.('image')?.enabled ? async (args, deadline) => {
@@ -919,7 +919,7 @@ export class PrivateConnector {
         if (result.reason === 'timeout') continue;
         return result.reason === 'input-required' ? '' : answerFrom(result);
       }
-    } finally { try { closeTools?.(); } finally { closePersona(); } }
+    } finally { try { await closeTools?.(); } finally { closePersona(); } }
   }
 
   async #deliver(event, transport, receipt, text, signal, current = () => true, choices = null) {

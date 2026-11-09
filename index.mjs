@@ -4,6 +4,8 @@ import { manageChatModel } from './model-config.mjs';
 import { manageMediaModel } from './model-media.mjs';
 import { manageMemorySettings } from './memory-settings.mjs';
 import { readMemoryView } from './memory-view.mjs';
+import { PublicBrowser } from './integrations/maomao-dsh/browser-runtime.mjs';
+import { manageWeb } from './web-settings.mjs';
 import { ChannelPersonas } from './integrations/maomao-dsh/personas.mjs';
 
 const channelStates = new Set(['ready', 'waiting', 'off']);
@@ -90,6 +92,11 @@ class MaomaoPanel extends TypertRemoteService {
       model: typeof model?.provider === 'string' && typeof model?.model === 'string'
         ? { provider: model.provider.slice(0, 100), model: model.model.slice(0, 120) } : null,
     };
+  }
+
+  webSettings(request, signal) {
+    requireOwner(this.ctx);
+    return manageWeb(this.ctx, request, signal);
   }
 
   channelSetup(request) {
@@ -198,11 +205,14 @@ class MaomaoPanel extends TypertRemoteService {
 }
 
 // Register the JavaScript method with Typert's source-mode discovery.
-for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'personas']) {
+for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'personas', 'webSettings']) {
   Remote(MaomaoPanel.prototype[name], { name, addInitializer: (fn) => initializers.push(fn) });
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  const browser = new PublicBrowser({ enabled: config.browser?.enabled !== false });
+  ctx.provide('maomaoBrowser', browser);
+  ctx.effect(() => () => browser.close());
   const setup = new ChannelSetup(ctx);
   const personas = new ChannelPersonas();
   ctx.provide('maomaoPersonas', personas);

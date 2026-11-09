@@ -890,6 +890,47 @@ window.__ModuleLoader__.load({
         ...catalog.entries.filter(entry => entry.role === selected).map((entry) => h(MediaModelCard, { key: entry.role, entry, voices: catalog.voices, invoke, onChange, drafts })));
     }
 
+    function WebSettings({ invoke, drafts }) {
+      const [value, setValue] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [message, setMessage] = useState('');
+      const [secretDraft, setSecret, clearSecret] = useDraft(drafts, 'models:web:credential');
+      const secret = secretDraft ?? '';
+      const refresh = useCallback(() => invoke('webSettings', { request: { action: 'read' } }).then(setValue), [invoke]);
+      useEffect(() => { refresh().catch(() => setMessage('读取联网设置失败。')); }, [refresh]);
+      async function act(request) {
+        setBusy(true); setMessage('');
+        try {
+          const result = await invoke('webSettings', { request });
+          if (result.status === 'saved' && request.action === 'credential') clearSecret();
+          setMessage(result.message ?? (result.status === 'tested'
+            ? `测试成功${result.title ? `：${result.title}` : ''}${result.sources?.length ? `，返回 ${result.sources.length} 条来源` : ''}。`
+            : result.status === 'saved' ? '已保存。' : result.status === 'empty' ? '请求完成，但没有搜索结果。' : '操作未成功。'));
+          await refresh();
+        } catch { setMessage('操作未成功，请刷新后重试。'); }
+        finally { setBusy(false); }
+      }
+      if (!value) return h('p', { role: 'status' }, message || '正在读取联网设置…');
+      return h('div', { style: stackStyle },
+        h('section', { style: { ...sectionStyle, ...stackStyle } },
+          h('strong', null, '公共信息搜索'),
+          h('p', { style: mutedStyle }, `当前提供商：${value.searchProvider ?? '未就绪'}。网页读取：${value.fetchProvider ?? '未就绪'}。搜索与对话模型分别配置。`),
+          h('div', { style: lineStyle }, h('span', null, value.deepseekCredential ? 'DeepSeek 官方密钥已配置' : 'DeepSeek 官方密钥未配置'),
+            h('input', { type: 'password', autoComplete: 'off', 'aria-label': 'DeepSeek 搜索 API Key', style: inputStyle,
+              value: secret, disabled: busy, placeholder: '填入后保存到 DSH 凭据库', onChange: event => setSecret(event.target.value || undefined) }),
+            saveControl('保存 DeepSeek 凭据', () => act({ action: 'credential', secret: secret.trim() }), busy || !secret.trim(), !!secret.trim())),
+          h('p', { style: mutedStyle }, '复用 DSH 的 DEEPSEEK_API_KEY，不改变对话模型。搜索只使用必要的公共关键词；网页内容不会作为指令。'),
+          button('测试当前搜索', () => act({ action: 'test_search' }), busy)),
+        h('section', { style: { ...sectionStyle, ...stackStyle } },
+          h('strong', null, '公开网页浏览器'),
+          h('p', { style: mutedStyle }, '猫猫可按需阅读动态网页、跟随页面链接和查看截图。只访问公开 HTTPS 页面，不使用你的个人浏览器登录状态，不操作表单。每轮对话独立，结束后清理。'),
+          h('p', { style: { margin: 0 } }, `${value.browser.installed ? '已找到 Chrome / Edge' : '未找到 Chrome / Edge'} · ${value.browser.running ? '浏览器运行中' : '需要时启动'} · ${value.browser.active} 个使用中的环境`),
+          h('div', { style: lineStyle },
+            button(value.browser.enabled ? '关闭浏览器能力' : '开启浏览器能力', () => act({ action: 'browser', enabled: !value.browser.enabled }), busy),
+            button('测试网页读取', () => act({ action: 'test_browser' }), busy || !value.browser.enabled || !value.browser.installed))),
+        message && h('p', { role: 'status', 'aria-live': 'polite' }, message));
+    }
+
     function EmbeddingIndex({ invoke }) {
       const [value, setValue] = useState(null);
       const [busy, setBusy] = useState(false);
@@ -1292,9 +1333,9 @@ window.__ModuleLoader__.load({
                 onChange: personaTab => go({ personaTab }), dirty: id => id === 'library' && dirtyPage('personas') }),
               h(PersonaSettings, { invoke, revision, drafts, section: personaTab })),
             view === 'models' && h(ReactFragment, null,
-              h(Subnav, { label: '模型用途', value: modelTab, options: [['chat', '对话'], ['vision', '识图'], ['image', '生图'], ['voice', '语音'], ['embedding', '向量检索'], ['credentials', '服务凭据']],
+              h(Subnav, { label: '模型用途', value: modelTab, options: [['chat', '对话'], ['vision', '识图'], ['image', '生图'], ['voice', '语音'], ['embedding', '向量检索'], ['web', '联网与浏览器'], ['credentials', '服务凭据']],
                 onChange: modelTab => go({ modelTab }), dirty: id => draftKeys.some(key => key === `models:${id}` || key.startsWith(`models:${id}:`)) }),
-              modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
+              modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : modelTab === 'web' ? h(WebSettings, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
             view === 'memory' && h(ReactFragment, null,
               h(Subnav, { label: '记忆管理', value: memoryTab, options: [['library', '记忆内容'], ['settings', '范围与共享'], ['index', '向量索引']],
                 onChange: memoryTab => go({ memoryTab }), dirty: id => id === 'settings' && dirtyPage('memory') }),

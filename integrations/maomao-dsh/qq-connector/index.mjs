@@ -662,7 +662,7 @@ export class MaomaoQqConnector {
       const voice = !peerTurn && lastSpeech && Date.now() - lastSpeech.at < 5 * 60_000 ? { previous: lastSpeech.text } : null;
       const imageEnabled = models?.mediaChoice?.('image')?.enabled ?? Boolean(this.#imageGeneration);
       const voiceEnabled = models?.mediaChoice?.('voice')?.enabled ?? Boolean(this.#speech);
-      const chatTools = test ? null : openChatTools({ current, signal, web: this.#ctx.get?.('web'),
+      const chatTools = test ? null : openChatTools({ current, signal, web: this.#ctx.get?.('web'), browser: this.#ctx.get?.('maomaoBrowser'),
         hasReference: !peerTurn && !quoted && source.senderId === envelope.senderId && Boolean(reference),
         image: imageEnabled ? async (args, toolSignal) => {
           const generation = models?.mediaChoice?.('image') ? await models.mediaAdapter('image') : this.#imageGeneration;

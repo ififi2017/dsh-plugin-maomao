@@ -71,9 +71,24 @@ test('web tools reuse DSH providers, cap output and requests, block non-public U
   assert.equal(requests.length, 3);
   assert.deepEqual(requests[0], { query: 'public topic', maxResults: 5 });
   t.close();
-  const missing = bind({ web: { search: async () => { throw new Error('provider credentials missing'); } } });
-  assert.deepEqual(await missing.run('maomao_web_search', { query: 'test' }), { status: 'unavailable', data: '' });
+  const missing = bind({ web: { search: async () => { throw Object.assign(new Error('secret credential detail'), { code: 'WEB_PROVIDER_CREDENTIAL_MISSING' }); } } });
+  const unavailable = await missing.run('maomao_web_search', { query: 'test' });
+  assert.equal(unavailable.status, 'unavailable');
+  assert.equal(JSON.parse(unavailable.data).code, 'WEB_PROVIDER_CREDENTIAL_MISSING');
+  assert.match(JSON.parse(unavailable.data).message, /凭据/);
+  assert.doesNotMatch(unavailable.data, /secret/);
   missing.close();
+});
+
+test('web diagnostics distinguish configuration failures without leaking unknown errors', async () => {
+  for (const code of ['WEB_PROVIDER_CONFIGURED_MISSING', 'WEB_PROVIDER_AMBIGUOUS', 'UNKNOWN_SECRET']) {
+    const t = bind({ web: { search: async () => { throw Object.assign(new Error('key=private-secret'), { code }); } } });
+    const value = await t.run('maomao_web_search', { query: 'public topic' });
+    assert.equal(value.status, 'unavailable');
+    assert.equal(JSON.parse(value.data).code, code === 'UNKNOWN_SECRET' ? 'WEB_PROVIDER_ERROR' : code);
+    assert.doesNotMatch(value.data, /private-secret|UNKNOWN_SECRET/);
+    t.close();
+  }
 });
 
 test('registration rollback closes partially registered tools', () => {
@@ -97,4 +112,37 @@ test('fixed voice conversion creates playable Ogg Opus from PCM WAV', async () =
   assert.equal(audio.buffer.toString('ascii', 0, 4), 'OggS');
   assert.ok(audio.buffer.includes(Buffer.from('OpusHead')));
   await assert.rejects(opusVoice(Buffer.alloc(1), AbortSignal.timeout(500)), /invalid_wav/);
+});
+
+test('browser tools are bound to the admitted session, bounded per turn, and disposed on revoke', async () => {
+  const calls = []; let closed = 0;
+  const browser = { enabled: true, lease(id) { calls.push(['lease', id]); return {
+    async run(action, args) { calls.push([action, args]); return { url: 'https://example.com', content: 'public text' }; },
+    async close() { closed++; },
+  }; } };
+  const t = bind({ browser });
+  const def = t.defs.get('maomao_browser_open');
+  assert.equal((await t.run(def.name, { url: 'https://example.com' }, { agent: { id: 'other' } })).status, 'denied');
+  assert.equal((await t.run(def.name, { url: 'https://127.0.0.1' })).status, 'denied');
+  assert.equal(calls.length, 0);
+  assert.equal((await t.run(def.name, { url: 'https://example.com' })).status, 'ok');
+  assert.deepEqual(calls[0], ['lease', 'test-session']);
+  assert.equal((await t.run('maomao_browser_screenshot', {})).status, 'unavailable');
+  await t.run('maomao_browser_read', {}); await t.run('maomao_browser_read', {});
+  assert.equal((await t.run('maomao_browser_read', {})).status, 'limit');
+  await t.close(); assert.equal(closed, 1);
+  assert.equal((await def.execute({ url: 'https://example.com' }, t.exec)).status, 'denied');
+});
+
+test('screenshot returns a DSH image attachment only to an image-capable calling route', async () => {
+  const ref = { attachmentId: 'image-1', mediaType: 'image/jpeg', bytes: 4, width: 10, height: 10 };
+  const t = bind({ browser: { enabled: true, lease() { return { run: async () => ({ url: 'https://example.com', data: Buffer.from('jpeg') }), close() {} }; } } });
+  const exec = { agent: { id: 'test-session', options: { provider: 'google', model: 'vision-model' }, ctx: { get: name => ({
+    llm: { resolveModelInfo: async () => ({ inputModalities: ['text', 'image'] }) },
+    attachments: { saveImage: async ({ data }) => { assert.equal(data.toString(), 'jpeg'); return ref; } },
+  })[name] } } };
+  const value = await t.run('maomao_browser_screenshot', {}, exec);
+  assert.equal(value.status, 'ok'); assert.deepEqual(value.image, ref);
+  assert.deepEqual(t.defs.get('maomao_browser_screenshot').output.render({}, value)[1], { type: 'image', attachment: ref });
+  await t.close();
 });

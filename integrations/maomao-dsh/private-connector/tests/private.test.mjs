@@ -55,7 +55,7 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
     sessionController: controller,
     get agentDefaultModel() { throw new Error('Cordis requires injection for direct service access'); },
     get(service) {
-      if (service === 'maomaoModels' || service === 'maomaoPersonas' || service === 'web') return undefined;
+      if (['maomaoModels', 'maomaoPersonas', 'web', 'maomaoBrowser'].includes(service)) return undefined;
       assert.equal(service, 'agentDefaultModel');
       return { currentSelection: () => ({ provider: 'google', model: 'synthetic' }) };
     },

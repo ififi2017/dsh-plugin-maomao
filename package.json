@@ -1,6 +1,6 @@
 {
   "name": "maomao-dsh-panel",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "type": "module",
   "main": "./index.mjs",
   "exports": {
@@ -21,6 +21,7 @@
     "channel-setup.mjs",
     "model-config.mjs",
     "model-media.mjs",
+    "web-settings.mjs",
     "memory-settings.mjs",
     "memory-view.mjs",
     "client.js",
@@ -64,7 +65,8 @@
     "qrcode-terminal": "0.12.0",
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "1.0.4",
-    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
+    "playwright-core": "1.65.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0"
