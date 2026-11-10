@@ -146,3 +146,26 @@ test('Lark collects through the actual model tool and Telegram reuses it without
   assert.deepEqual(sent.slice(1).map(v => [v.platform, v.kind ?? 'text']), [['telegram', 'sticker'], ['telegram', 'text']]);
   assert.equal(active.size, 0);
 });
+
+test('a sticker whose file is gone does not use up the turn, and only one sticker is ever sent', async () => {
+  const { openStickerTools } = await import('../integrations/maomao-dsh/sticker-tools.mjs');
+  const { mkdtempSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const file = join(mkdtempSync(join(tmpdir(), 'maomao-sticker-')), 'ok.png');
+  writeFileSync(file, Buffer.from([137, 80, 78, 71, 1, 2, 3]));
+  const sent = [];
+  const operate = async (action, args) => action === 'search' ? { status: 'ok', items: [{ id: 'gone' }, { id: 'ok' }] }
+    : action === 'resolve' ? (args.id === 'ok' ? { status: 'ok', path: file } : { status: 'missing' }) : { status: 'invalid' };
+  const tools = openStickerTools({ current: () => true, signal: AbortSignal.timeout(5000), operate, send: async (media) => { sent.push(media.id); return 'sent'; } });
+  let definition;
+  tools.bind('s', { register(d) { definition = d; return () => {}; } });
+  const run = (args) => definition.execute(args, { agent: { id: 's' } });
+  await run({ action: 'search', query: '开心' });
+  const gone = await run({ action: 'send', id: 'gone' });
+  assert.equal(gone.status, 'missing'); assert.match(JSON.parse(gone.data).reason, /换一张/);
+  const [first, second] = await Promise.all([run({ action: 'send', id: 'ok' }), run({ action: 'send', id: 'ok' })]);
+  assert.deepEqual([first.status, second.status].sort(), ['limit', 'sent']);
+  assert.equal((await run({ action: 'send', id: 'ok' })).status, 'limit');
+  assert.deepEqual(sent, ['ok']);
+});

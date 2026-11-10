@@ -191,3 +191,21 @@ test('screenshot returns a DSH image attachment only to an image-capable calling
   assert.deepEqual(t.defs.get('maomao_browser_screenshot').output.render({}, value)[1], { type: 'image', attachment: ref });
   await t.close();
 });
+
+test('malformed arguments come back as invalid with a fix, while blocked targets stay denied with a reason', async () => {
+  const t = bind({ image: async () => 'sent', web: { search: async () => ({ sources: [] }), fetch: async () => ({}) } });
+  const reason = (value) => JSON.parse(value.data).reason;
+  const empty = await t.run('maomao_web_search', { query: '' });
+  assert.equal(empty.status, 'invalid'); assert.match(reason(empty), /query/);
+  const ratio = await t.run('maomao_generate_image', { ...imageArgs, aspect_ratio: '4:3' });
+  assert.equal(ratio.status, 'invalid'); assert.match(reason(ratio), /1:1/);
+  const issue = await t.run('maomao_project_read', { repository: 'https://github.com/o/r/issues/3' });
+  assert.equal(issue.status, 'invalid'); assert.match(reason(issue), /tree\/blob/);
+  const local = await t.run('maomao_web_fetch', { url: 'http://127.0.0.1' });
+  assert.equal(local.status, 'denied'); assert.match(reason(local), /公开/);
+  const reference = await t.run('maomao_generate_image', { ...imageArgs, reference_id: 'invented' });
+  assert.equal(reference.status, 'denied'); assert.match(reason(reference), /maomao_reference_image/);
+  // None of these consumed the single media send for the turn.
+  assert.equal((await t.run('maomao_generate_image', imageArgs)).status, 'sent');
+  t.close();
+});

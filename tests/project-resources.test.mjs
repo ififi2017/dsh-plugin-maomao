@@ -44,8 +44,17 @@ test('public resources pin checked DNS, recheck redirects, never send ambient cr
 
 test('public project reads expose actual paths, versions, prompt text and image URLs without following links', async () => {
   const repository = 'https://github.com/example/art';
-  for (const args of [{ repository: repository + '/tree/main' }, { repository, path: '../secrets' },
-    { repository, path: '/tmp/file' }, { repository, offset: -1 }, { repository: 'https://example.com/a/b' }]) assert.equal(projectRequest(args), null);
+  for (const args of [{ repository: repository + '/issues/3' }, { repository, path: '../secrets' },
+    { repository, path: '/tmp/file' }, { repository, offset: -1 }, { repository: 'https://example.com/a/b' },
+    { repository: 'https://u:p@github.com/example/art' }]) assert.equal(projectRequest(args), null);
+  // URL parsing collapses dot segments before matching, so a link cannot climb out of the repository.
+  assert.equal(projectRequest({ repository: repository + '/tree/main/docs/../../..' }).api, 'https://api.github.com/repos/example/art/contents/');
+  // Pasted tree/blob/clone links resolve to the repository root plus ref and path.
+  const pick = (args) => { const r = projectRequest(args); return r && [r.repository, r.ref, r.path]; };
+  assert.deepEqual(pick({ repository: repository + '.git' }), [repository, '', '']);
+  assert.deepEqual(pick({ repository: repository + '/tree/dev/docs/art' }), [repository, 'dev', 'docs/art']);
+  assert.deepEqual(pick({ repository: repository + '/blob/v1.2/README.md?plain=1#L3-L9' }), [repository, 'v1.2', 'README.md']);
+  assert.deepEqual(pick({ repository: repository + '/tree/main/docs', path: 'art', ref: 'dev' }), [repository, 'dev', 'art']);
   const row = { type: 'file', name: '角色.md', path: '角色.md', size: 100, sha: 'a'.repeat(40),
     html_url: repository + '/blob/main/角色.md', download_url: 'https://raw.githubusercontent.com/example/art/main/角色.md',
     encoding: 'base64', content: Buffer.from('# Cat\nWhite ears.\n![reference](参考图/猫.png)\n[Prompt](prompt.md)').toString('base64') };

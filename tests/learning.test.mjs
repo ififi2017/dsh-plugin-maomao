@@ -205,3 +205,22 @@ test('follow-ups and the cat diary reach later turns and scheduled recall withou
   assert.equal(recall.diary.length, 1);
   assert.deepEqual(runtime.recall({ namespace: 'private', scope: 'never-seen', subject: 'owner-a' }), { followups: [], diary: [] });
 });
+
+test('memory search matches every keyword, and the context says how many older memories are not listed', async t => {
+  const { runtime, open } = fixture(t);
+  const one = open({ text: '我周末喜欢去拍鸟，也喜欢烩面和下雨天', sourceId: 'likes' });
+  assert.equal((await one.run('maomao_memory', { action: 'save', kind: 'profile', title: '周末拍鸟', body: '周末常去拍鸟',
+    quote: '周末喜欢去拍鸟', source: one.lease.source })).status, 'saved');
+  const count = async (query) => JSON.parse((await one.run('maomao_memory', { action: 'search', query })).data).items.length;
+  assert.equal(await count('周末 拍鸟'), 1);
+  assert.equal(await count('拍鸟，周末'), 1);
+  assert.equal(await count('周末 游泳'), 0);
+  one.close();
+  const store = runtime.store(one.lease.scopeId);
+  for (let i = 0; i < 25; i++) store.save({ kind: 'episode', title: `旧事${i}`, body: '一件小事' }, { subject: 'owner-a', owner: true, manual: true });
+  const later = open({ text: '今天下雨了', sourceId: 'later' });
+  const context = later.lease.context();
+  assert.match(context, /周末拍鸟/, 'stable profile facts stay listed even when newer entries pile up');
+  assert.match(context, /另有约 \d+ 条较早的记忆没列出/);
+  later.close();
+});

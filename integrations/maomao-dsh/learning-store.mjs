@@ -45,9 +45,11 @@ export class LearningStore {
   evidence(subject) { return this.db(db => db.prepare("SELECT e.*,coalesce(o.kind,'user') AS origin,o.links FROM evidence e LEFT JOIN evidence_origins o ON o.id=e.id WHERE subject=? ORDER BY at DESC LIMIT 8").all(subject)); }
   list({ query = '', kind = '', page = 0, active = false } = {}) {
     const now = this.clock();
-    const where = `WHERE (?='' OR kind=?) AND (?='' OR instr(lower(title||' '||body),lower(?))>0)
+    // Models search with several keywords ("周末 拍鸟"); every keyword must appear somewhere in title or body.
+    const terms = String(query).split(/[\s,，、;；]+/).filter(Boolean).slice(0, 6);
+    const where = `WHERE (?='' OR kind=?) ${terms.map(() => "AND instr(lower(title||' '||body),lower(?))>0").join(' ')}
       AND (?=0 OR (status='active' AND (expires IS NULL OR expires>?)))`;
-    const args = [kind, kind, query, query, active ? 1 : 0, now];
+    const args = [kind, kind, ...terms, active ? 1 : 0, now];
     return this.db(db => ({ total: db.prepare(`SELECT count(*) AS n FROM entries ${where}`).get(...args).n,
       items: db.prepare(`SELECT * FROM entries ${where} ORDER BY updated DESC,id LIMIT 20 OFFSET ?`).all(...args, page * 20)
         .map(row => ({ ...row, status: row.status === 'active' && row.expires !== null && row.expires <= now ? 'expired' : row.status })), pageSize: 20 }));

@@ -52,9 +52,14 @@ export async function loadPublicImage(url, { signal, read = publicResource } = {
 export function projectRequest(args) {
   try {
     const u = new URL(args.repository);
-    if (u.origin !== 'https://github.com' || u.username || u.password || u.search || u.hash) return null;
-    const match = /^\/([a-z0-9_.-]+)\/([a-z0-9_.-]+)\/?$/i.exec(u.pathname);
-    const path = args.path ?? '', ref = args.ref ?? '', offset = args.offset ?? 0;
+    // The API URL is rebuilt from owner/repo/ref/path, so a pasted #L10 or ?plain=1 is simply ignored.
+    if (u.origin !== 'https://github.com' || u.username || u.password) return null;
+    // People paste tree/blob links and clone URLs; read them as root + ref + path.
+    // A branch name with slashes is ambiguous in these links, so pass ref and path explicitly for those.
+    const match = /^\/([a-z0-9_.-]+?)\/([a-z0-9_.-]+?)(?:\.git)?(?:\/(?:(?:tree|blob)\/([^/]+)(?:\/(.*?))?)?)?\/?$/i.exec(u.pathname);
+    let linkPath = '';
+    try { linkPath = match?.[4] ? decodeURIComponent(match[4]) : ''; } catch { return null; }
+    const path = args.path || linkPath, ref = args.ref || (match?.[3] ? decodeURIComponent(match[3]) : ''), offset = args.offset ?? 0;
     if (!match || typeof path !== 'string' || path.length > 1000 || path.startsWith('/') || path.includes('\\')
       || /[\x00-\x1f]/.test(path) || path.split('/').some(p => ['.', '..'].includes(p))
       || typeof ref !== 'string' || ref.length > 200 || /[\x00-\x1f]/.test(ref)
@@ -79,7 +84,8 @@ export async function readPublicProject(args, { signal, read = publicResource } 
   const info = { ...input, api: undefined, ...file(data) };
   if (data.type !== 'file') return { ...info, kind: 'unsupported', note: 'Symlinks and submodules are not followed.' };
   if (info.image_url) return { ...info, kind: 'image', note: 'Use maomao_reference_image to view and obtain a generation reference_id.' };
-  if (!/\.(md|mdx|txt|json|ya?ml|toml|html?|csv|prompt)$/i.test(data.name) || data.size > 250000 || data.encoding !== 'base64')
+  if (!(/\.(md|mdx|txt|json|ya?ml|toml|html?|csv|prompt)$/i.test(data.name) || /^(?:README|LICENSE|NOTICE|AUTHORS|CHANGELOG|CONTRIBUTING)$/i.test(data.name))
+    || data.size > 250000 || data.encoding !== 'base64')
     return { ...info, kind: 'unsupported', note: 'Read small text documentation and prompts; no code execution or archive downloads.' };
   const content = Buffer.from(data.content, 'base64').toString('utf8');
   const end = input.offset + 12000;
