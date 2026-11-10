@@ -16,7 +16,7 @@ import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
 import { GeminiImageGeneration, OpenAiImageGeneration } from './image-generation.mjs';
 import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, SPLIT_IMAGE_WAIT_MS,
   textBubbles, waitsForSplitImage } from './inbound.mjs';
-import { plainQqMarkdown } from './markdown.mjs';
+import { hasChatMarkdown, plainChatMarkdown } from '../message-markdown.mjs';
 import { loadQqImage } from './media.mjs';
 import { OrdinaryBridge } from './ordinary.mjs';
 import { PassiveShadow } from './shadow.mjs';
@@ -1021,10 +1021,11 @@ export class MaomaoQqConnector {
     };
     if (!current()) return '';
     this.#shadow?.noteOutbound(envelope, content);
-    const plain = plainQqMarkdown(content);
-    if ((keyboard || (!choices && plain !== content)) && this.#config.markdownSupport !== false && !this.#markdownDenied.has(envelope.scope)) {
+    const plain = plainChatMarkdown(content);
+    const choiceText = choices ? '\n\n' + choices.map((label, index) => (index + 1) + '. ' + label).join('\n') + '\n可以直接回复你想选的方向。' : '';
+    if ((keyboard || hasChatMarkdown(content, plain)) && this.#config.markdownSupport !== false && !this.#markdownDenied.has(envelope.scope)) {
       try {
-        const result = await this.#bot.send({ ...options, msgType: MsgType.MARKDOWN, markdown: { content },
+        const result = await this.#bot.send({ ...options, msgType: MsgType.MARKDOWN, markdown: { content: keyboard ? content : content + choiceText },
           ...(keyboard ? { keyboard } : {}) });
         return typeof result?.id === 'string' ? result.id : '';
       } catch (error) {
@@ -1036,8 +1037,7 @@ export class MaomaoQqConnector {
         if (!current()) return '';
       }
     }
-    const fallback = choices ? `${plain}\n\n${choices.map((label, index) => `${index + 1}. ${label}`).join('\n')}\n可以直接回复你想选的方向。` : plain;
-    const result = await this.#bot.send({ ...options, content: fallback, msgType: MsgType.TEXT });
+    const result = await this.#bot.send({ ...options, content: plain + choiceText, msgType: MsgType.TEXT });
     return typeof result?.id === 'string' ? result.id : '';
   }
 }

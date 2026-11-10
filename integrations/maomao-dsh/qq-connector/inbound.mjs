@@ -1,3 +1,4 @@
+import { hasMarkdownBlock, hasMarkdownFence } from '../message-markdown.mjs';
 const NON_EMPTY = (value) => typeof value === 'string' ? value.trim() : '';
 const LEADING_MENTION = /^<@!?([A-Za-z0-9_-]{1,128})>\s*/;
 const IMAGE_REFERENCE = /这(?:张|幅|图|个(?:图|表情))|那(?:张|幅|图|个(?:图|表情))|(?:刚才|刚发|上面|之前)(?:的)?(?:图|表情)|(?:看|识别|评价|认认)(?:一下|一眼|看|下)?(?:这|那|图)/;
@@ -136,10 +137,10 @@ export function allowedInbound(envelope, config) {
 export function textBubbles(text, maximum = 4) {
   if (typeof text !== 'string' || !text.trim()) return [];
   const clean = text.replace(/(?:<\|){2,}bubble\|>/g, '<|bubble|>');
-  if (clean.includes('```')) return [clean.replaceAll('<|bubble|>', '\n\n').trim()];
+  if (hasMarkdownFence(clean)) return [clean.replaceAll('<|bubble|>', '\n\n').trim()];
   let parts;
   if (clean.includes('<|bubble|>')) parts = clean.split('<|bubble|>');
-  else if (clean.length <= 900 && !/^\s*(?:[-*+]\s|\d+[.)]\s|\|)/m.test(clean)) parts = clean.split(/\n\s*\n/);
+  else if (clean.length <= 900 && !hasMarkdownBlock(clean)) parts = clean.split(/\n\s*\n/);
   else return [clean.trim()];
   parts = parts.map((part) => part.trim()).filter(Boolean);
   if (parts.length > maximum) parts = [...parts.slice(0, maximum - 1), parts.slice(maximum - 1).join('\n\n')];

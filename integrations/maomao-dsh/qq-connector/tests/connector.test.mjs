@@ -53,17 +53,24 @@ test('QQ renders formatted replies and falls back on a definite Markdown rejecti
     await reply('native', '拍鸟最难的是**找鸟**。');
     assert.equal(sent[0].msgType, 2);
     assert.deepEqual(sent[0].markdown, { content: '拍鸟最难的是**找鸟**。' });
+    const table = '| 项目 | 状态 |\n| --- | --- |\n| 找鸟 | 完成 |';
+    await reply('native-table', table);
+    assert.equal(sent[1].msgType, 2);
+    assert.deepEqual(sent[1].markdown, { content: table });
     await assert.rejects(reply('timeout', '**投递未知**'), /timed out/);
-    assert.equal(sent.length, 2);
+    assert.equal(sent.length, 3);
     await reply('denied', '## 要点\n- **找鸟** 和 `a * b`，比 2 * 3 * 4 难。');
-    assert.equal(sent[2].msgType, 2);
-    assert.equal(sent[3].msgType, 0);
-    assert.equal(sent[3].content, '要点\n• 找鸟 和 a * b，比 2 * 3 * 4 难。');
-    assert.deepEqual(sent[2].target, sent[3].target);
-    assert.deepEqual(sent[2].extra, sent[3].extra);
+    assert.equal(sent[3].msgType, 2);
+    assert.equal(sent[4].msgType, 0);
+    assert.equal(sent[4].content, '要点\n• 找鸟 和 a * b，比 2 * 3 * 4 难。');
+    assert.deepEqual(sent[3].target, sent[4].target);
+    assert.deepEqual(sent[3].extra, sent[4].extra);
     await reply('after-denial', '还有**第二句**。');
-    assert.equal(sent.length, 5);
-    assert.equal(sent[4].content, '还有第二句。');
+    assert.equal(sent.length, 6);
+    assert.equal(sent[5].content, '还有第二句。');
+    await reply('table-fallback', '| 项目 | 状态 |\n| --- | --- |\n| 找鸟 | 完成 |');
+    assert.equal(sent[6].msgType, 0);
+    assert.equal(sent[6].content, '| 项目 | 状态 |\n| 找鸟 | 完成 |');
   } finally {
     await connector.stop();
   }

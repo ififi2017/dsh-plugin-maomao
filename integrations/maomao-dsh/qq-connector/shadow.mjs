@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
-import { plainQqMarkdown } from './markdown.mjs';
+import { plainChatMarkdown } from '../message-markdown.mjs';
 import { GROUP_REPLY_MS } from './state.mjs';
 
 const CONTEXT_MS = 8 * 60_000;
@@ -219,7 +219,7 @@ export class PassiveShadow {
     if (!state || state.rows.some((row) => row.messageId === messageId)) return null;
     const now = this.#clock();
     if (state.outbound.some((row) => now - row.at < 15_000
-      && row.text === oneLine(plainQqMarkdown(content), 400))) return null;
+      && row.text === oneLine(plainChatMarkdown(content), 400))) return null;
     const speaker = oneLine(message.senderName || message.raw?.author?.nickname, 64) || digest(senderId ?? '');
     state.peerVersion += 1;
     state.rows.push({ at: now, role: 'participant', speaker, senderId, text, messageId });
@@ -305,7 +305,7 @@ export class PassiveShadow {
   noteOutbound(envelope, text) {
     if (this.#closed || envelope.scope !== 'group') return;
     const state = this.#state(envelope);
-    state.outbound.push({ at: this.#clock(), text: oneLine(plainQqMarkdown(text), 400) });
+    state.outbound.push({ at: this.#clock(), text: oneLine(plainChatMarkdown(text), 400) });
     state.outbound = state.outbound.slice(-8);
   }
 
