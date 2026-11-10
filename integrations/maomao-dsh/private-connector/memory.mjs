@@ -11,7 +11,7 @@ export class OwnerMemory {
 
   async run(op, { owner, turnId, text = '', answer = '', details }, signal) {
     const { root, companionPath, embedding, modelSelection, quietHours, python = 'python3' } = this.#config;
-    const models = ['begin', 'finish', 'index_status', 'index_rebuild'].includes(op) ? modelSelection?.() : null;
+    const models = ['begin', 'finish', 'index_status', 'index_rebuild', 'sticker_tool'].includes(op) ? modelSelection?.() : null;
     const choice = models?.mediaChoice?.('embedding');
     const settings = choice ? await models.embedding().catch(() => null)
       : embedding ? { key: process.env.OPENROUTER_API_KEY } : null;
@@ -33,7 +33,7 @@ export class OwnerMemory {
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', (chunk) => {
         result += chunk;
-        if (result.length > 24_000) child.kill();
+        if (result.length > (op === 'sticker_tool' ? 700_000 : 24_000)) child.kill();
       });
       child.on('error', () => reject(new Error('private_ordinary_worker_unavailable')));
       child.on('close', (code) => {

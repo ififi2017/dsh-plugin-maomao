@@ -55,7 +55,7 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
     sessionController: controller,
     get agentDefaultModel() { throw new Error('Cordis requires injection for direct service access'); },
     get(service) {
-      if (['maomaoModels', 'maomaoPersonas', 'web', 'maomaoBrowser'].includes(service)) return undefined;
+      if (['maomaoModels', 'maomaoPersonas', 'web', 'maomaoBrowser', 'maomaoLearning'].includes(service)) return undefined;
       assert.equal(service, 'agentDefaultModel');
       return { currentSelection: () => ({ provider: 'google', model: 'synthetic' }) };
     },
@@ -450,4 +450,53 @@ test('Telegram rapid text and image messages become one ordered model turn and o
     assert.deepEqual(prompts[0].content, [{ type: 'text', text: '用户发送了一张图片。' }, image,
       { type: 'text', text: '看看这张图' }, { type: 'text', text: '只说主体' }]);
   } finally { await connector.stop(); }
+});
+
+test('scheduled check-ins are written by the chat model, may be declined, and fall back only when no model answers', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-private-compose-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tg = { platform: 'telegram', accountId: '2000', chatId: '1001', senderId: '1001' };
+  const owner = digest(['ordinary-owner', 'owner']);
+  const ledger = new PrivateLedger(join(root, 'delivery.sqlite3'));
+  ledger.verifyRoute(digest([tg.platform, tg.accountId, tg.chatId, owner]));
+  ledger.recordActivity(owner, Date.now() - 2 * 3600_000);
+  ledger.close();
+  const sends = [];
+  const prompts = [];
+  let reply = '{"send":true,"text":"晒了一下午太阳，突然想起你说周五面试，咋样了？"}';
+  const llm = { async prepareCall() {
+    return { config: {}, async *stream({ messages }) {
+      prompts.push(messages);
+      if (reply === null) throw new Error('offline');
+      yield { type: 'text-delta', text: reply };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    } };
+  } };
+  const services = { maomaoModels: { chat: () => ({ provider: 'p', model: 'm' }) }, llm };
+  const ctx = { get: (key) => services[key] };
+  const contact = { async run(op) {
+    if (op === 'contact_check') return { allowed: true, last_incoming: Date.now() / 1000 - 7200, unanswered: 1, max_chars: 100 };
+    if (op === 'activity_candidate') return {};
+    if (op === 'contact_reserve') return { ticket: `t${sends.length}` };
+    if (op === 'contact_dispatch') return { allowed: true };
+    return {};
+  } };
+  const routes = new Map([['telegram', { ready: () => true, send(_chat, text) { sends.push(text); return String(sends.length); } }]]);
+  const live = new PrivateConnector(ctx, { stateRoot: root, bindings: [{ owner: 'owner', endpoints: [tg] }],
+    telegram: { accountId: tg.accountId }, memory: { enabled: false },
+    sharing: { enabled: true, destination: tg, schedule: { enabled: true, mode: 'send', browse: false, lonely: true } },
+  }, { routes, contact });
+  try {
+    assert.deepEqual(await live.runScheduled(), { status: 'sent', source: 'lonely' });
+    assert.equal(sends[0], '晒了一下午太阳，突然想起你说周五面试，咋样了？');
+    const situation = JSON.parse(prompts[0][1].content[0].text);
+    assert.equal(situation.unansweredCheckIns, 1);
+    assert.equal(situation.hoursSinceOwnerLastSpoke, 2);
+    reply = '{"send":false}';
+    assert.deepEqual(await live.runScheduled({ preview: true }), { status: 'unavailable', reason: 'declined' });
+    reply = '{"send":true,"text":"看看这个 https://example.com"}';
+    assert.equal((await live.runScheduled({ preview: true })).text, '猫猫在窗边伸了个懒腰。等你有空再聊喵。');
+    reply = null;
+    assert.equal((await live.runScheduled({ preview: true })).text, '猫猫在窗边伸了个懒腰。等你有空再聊喵。');
+  } finally { await live.stop(); }
 });

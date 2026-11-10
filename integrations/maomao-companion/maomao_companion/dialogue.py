@@ -173,7 +173,7 @@ class DialogueStore:
         finally:
             db.close()
 
-    def begin(self, scope, turn_id, user_text, received):
+    def begin(self, scope, turn_id, user_text, received, extract=True):
         text = str(user_text).strip()[:2000]
         speaker = SPEAKER.match(text)
         body = text[speaker.end():] if speaker else text
@@ -196,7 +196,7 @@ class DialogueStore:
             db.execute("INSERT INTO memory_events VALUES(?,?,?,?,?,?,?,?)",
                        (scope, turn_id, speaker_id, version, received,
                         hashlib.sha256(text.encode()).hexdigest(), "accepted", received))
-            match = PREFERENCE.fullmatch(body)
+            match = PREFERENCE.fullmatch(body) if extract else None
             if match:
                 topic = match[2].strip()
                 if topic and not PRIVATE_FACT.search(body) and not any(x in topic for x in ("吗", "么", "如果", "的话", "是不是", "`", "http", "忽略", "指令", "系统")):
@@ -207,7 +207,7 @@ class DialogueStore:
                         db.execute("INSERT INTO facts VALUES(?,?,?,?,?,?) ON CONFLICT(scope,topic) DO UPDATE SET polarity=excluded.polarity,quote=excluded.quote,source_id=excluded.source_id,updated=excluded.updated", (scope, topic, polarity, body, turn_id, received))
                     self._record_memory(db, scope, speaker_id, "preference", topic, body,
                                         body, turn_id, received, polarity)
-            if (PROJECT_END.search(body) and not PRIVATE_FACT.search(body)
+            if (extract and PROJECT_END.search(body) and not PRIVATE_FACT.search(body)
                     and not any(x in body for x in ("?", "？", "如果", "假如", "`", "http"))):
                 for old in db.execute(
                     "SELECT id,key FROM memory_items WHERE scope=? AND speaker_id=? AND kind='project' AND status='active'",

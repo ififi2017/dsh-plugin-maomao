@@ -18,14 +18,16 @@ test('Telegram media uses multipart native photo or voice reply with a fixed adm
     assert.equal(req.body.get('chat_id'), '1001');
     assert.deepEqual(JSON.parse(req.body.get('reply_parameters')), { message_id: 2 });
     assert.equal(req.headers['content-type'], undefined);
-    assert.ok(req.body.get(url.endsWith('sendVoice') ? 'voice' : 'photo') instanceof Blob);
+    assert.ok(req.body.get(({ sendVoice: 'voice', sendPhoto: 'photo', sendAnimation: 'animation', sendSticker: 'sticker' })[url.split('/').at(-1)]) instanceof Blob);
     return Response.json({ ok: true, result: { message_id: 3 } });
   } });
   const signal = AbortSignal.timeout(5000);
   assert.equal(await tg.replyMedia(event, media, 'ticket', signal), '3');
   assert.equal(await tg.replyMedia(event, { ...media, kind: 'voice', mediaType: 'audio/ogg', fileName: 'voice.ogg' }, 'ticket2', signal), '3');
+  assert.equal(await tg.replyMedia(event, { ...media, kind: 'sticker', mediaType: 'image/gif', fileName: 'meme.gif' }, 'gif', signal), '3');
+  assert.equal(await tg.replyMedia(event, { ...media, kind: 'sticker' }, 'sticker', signal), '3');
   assert.equal(await tg.replyMedia(event, media, 'revoked', signal, () => false), null);
-  assert.deepEqual(requests, ['sendPhoto', 'sendVoice']);
+  assert.deepEqual(requests, ['sendPhoto', 'sendVoice', 'sendAnimation', 'sendSticker']);
 });
 
 test('Lark uploads native image/Opus then replies, with revocation checked between upload and send', async () => {

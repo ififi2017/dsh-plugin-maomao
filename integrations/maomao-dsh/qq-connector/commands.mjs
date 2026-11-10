@@ -44,7 +44,8 @@ export function qqPersonaReply(command, { book, target, owner }) {
 
 export function sidReply(envelope, admission) {
   const lines = [`QQ 发送者 OpenID：${safeId(envelope.senderId)}`];
-  if (envelope.scope === 'group') lines.push(`QQ群 OpenID：${safeId(envelope.chatId)}`);
+  if (envelope.scope === 'group') lines.push(`QQ群 OpenID：${safeId(envelope.chatId)}`,
+    `本群主人身份：${admission?.owner ? '已验证' : '未绑定'}`, '在本群 @猫猫 发送 /pair 查看主人绑定方法。');
   if (envelope.scope === 'c2c' && admission) {
     lines.push(`私聊授权：${admission.paired ? '已配对或加入白名单' : admission.acceptStrangers ? '允许陌生人聊天（尚未配对）' : '尚未配对'}`,
       `主人身份：${admission.owner ? '已配置' : '未配置'}`,

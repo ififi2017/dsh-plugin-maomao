@@ -78,6 +78,7 @@ window.__ModuleLoader__.load({
       : key.startsWith('models:credentials:') ? { view: 'models', modelTab: 'credentials' }
       : key.startsWith('models:') ? { view: 'models', modelTab: key.slice(7) }
       : key.startsWith('personas:') ? { view: 'personas', personaTab: 'library' }
+      : key.startsWith('memory:learning') ? { view: 'memory', memoryTab: 'learning' }
       : key.startsWith('memory:') ? { view: 'memory', memoryTab: 'settings' }
       : { view: 'channels', platform: 'qq', channelTab: 'bindings' };
     function Subnav({ label, value, options, onChange, dirty = () => false }) {
@@ -1055,6 +1056,118 @@ window.__ModuleLoader__.load({
             h('p', { style: { margin: 0 } }, '开始和结束相同时全天免打扰。启用后，目标私聊发一条消息即可启动计时。'))));
     }
 
+    const learningKinds = { profile: '对象档案', episode: '经历与待办', skill: '可复用技能', style: '语气与互动习惯', meme: '梗知识', followup: '惦记的事', diary: '猫猫日记' };
+    const learningResults = { saved: '已保存', failed: '操作失败，请重试', conflict: '这条内容刚有更新，请刷新后再修改',
+      invalid: '内容或参数不符合要求', missing: '这条内容已不可用', unavailable: '学习服务尚未就绪', forgotten: '已遗忘，请从版本记录恢复' };
+    function LearningView({ invoke, drafts }) {
+      const [catalog, setCatalog] = useState(null);
+      const [filters, setFilters] = useState({ sourceId: '', kind: '', query: '', page: 0 });
+      const [query, setQuery] = useState('');
+      const [result, setResult] = useState(null);
+      const [refresh, setRefresh] = useState(0);
+      const [busy, setBusy] = useState(false);
+      const [notice, setNotice] = useState('');
+      const [history, setHistory] = useState(null);
+      const [confirmation, setConfirmation] = useState(null);
+      const [settingsDraft, setSettingsDraft, clearSettings] = useDraft(drafts, 'memory:learning-settings');
+      const [edit, setEdit, clearEdit] = useDraft(drafts, 'memory:learning-edit');
+      useEffect(() => {
+        const cancel = new AbortController();
+        invoke('learning', { request: { action: 'list' } }, cancel.signal).then(value => {
+          if (cancel.signal.aborted) return;
+          if (value.status !== 'ok') { setNotice(learningResults[value.status] ?? '读取失败'); return; }
+          setCatalog(value);
+          setFilters(previous => ({ ...previous, sourceId: previous.sourceId || value.sources[0]?.id || '' }));
+        }).catch(() => { if (!cancel.signal.aborted) setNotice('读取失败，请刷新'); });
+        return () => cancel.abort();
+      }, [invoke, refresh]);
+      useEffect(() => {
+        setResult(null); setHistory(null); setConfirmation(null);
+        if (!filters.sourceId) return;
+        const cancel = new AbortController();
+        invoke('learning', { request: { action: 'read', ...filters } }, cancel.signal).then(value => {
+          if (!cancel.signal.aborted) setResult(value);
+        }).catch(() => { if (!cancel.signal.aborted) setResult({ status: 'failed' }); });
+        return () => cancel.abort();
+      }, [invoke, filters, refresh]);
+      async function act(request) {
+        setBusy(true); setNotice('');
+        try {
+          const value = await invoke('learning', { request });
+          setNotice(learningResults[value.status] ?? (value.status === 'ok' ? '' : '操作失败'));
+          if (value.status === 'saved') { setRefresh(n => n + 1); setConfirmation(null); }
+          return value;
+        } catch { setNotice('操作失败，请重试'); return { status: 'failed' }; }
+        finally { setBusy(false); }
+      }
+      async function download(id) {
+        const value = await act({ action: 'export', sourceId: filters.sourceId, ...(id ? { id } : {}) });
+        if (!value.markdown) return;
+        const url = URL.createObjectURL(new Blob([value.markdown], { type: 'text/markdown;charset=utf-8' }));
+        const anchor = document.createElement('a'); anchor.href = url; anchor.download = value.filename; anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      const settings = { ...catalog?.settings, ...settingsDraft };
+      const setting = (key, value) => {
+        const next = { ...settingsDraft, [key]: value };
+        if (value === catalog.settings[key]) delete next[key];
+        setSettingsDraft(Object.keys(next).length ? next : undefined);
+      };
+      const change = patch => setFilters(previous => ({ ...previous, ...patch, page: patch.page ?? 0 }));
+      return h('div', { style: stackStyle },
+        h('section', { style: { ...sectionStyle, ...stackStyle } },
+          h('h3', { style: { margin: 0 } }, '猫猫学到了什么'),
+          h('p', { style: { margin: 0 } }, '猫猫会从普通聊天学习记忆、语气、梗和表情搭配，按需要查询和复用。每条保留来源和最近 20 个版本。QQ 按群或私聊隔离；已授权共享的 Lark 与 Telegram 按主人合并。'),
+          catalog && h('div', { style: stackStyle },
+            h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.enabled), onChange: e => setting('enabled', e.target.checked) }), ' 允许自主记忆和技能复用'),
+            h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.reflection), onChange: e => setting('reflection', e.target.checked) }), ' 回复后后台总结（使用当前对话模型，产生额外调用）'),
+            h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.stickers), onChange: e => setting('stickers', e.target.checked) }), ' 允许模型调用表情包工具（QQ、Lark / 飞书、Telegram）'),
+            h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.collectStickers), onChange: e => setting('collectStickers', e.target.checked) }), ' 允许收藏收到的可复用表情（需要已启用识图）'),
+            h('label', { style: lineStyle }, '每个范围每日最多总结', h('input', { type: 'number', min: 0, max: 100, style: { ...inputStyle, width: 80 },
+              value: settings.dailyLimit, onChange: e => setting('dailyLimit', Number(e.target.value)) }), '次；所有范围合计最多 200 次'),
+            saveControl('保存学习设置', async () => { if ((await act({ action: 'settings', ...settings })).status === 'saved') clearSettings(); }, busy || !settingsDraft, Boolean(settingsDraft))),
+          notice && h('p', { role: 'status', style: { margin: 0 } }, notice)),
+        edit && h('section', { style: { ...sectionStyle, ...stackStyle, borderColor: '#b8791f' } },
+          h('h4', { style: { margin: 0 } }, '修正学习内容 · 未保存'),
+          h('input', { 'aria-label': '经验标题', value: edit.entry.title, maxLength: 100, style: inputStyle,
+            onChange: e => setEdit({ ...edit, entry: { ...edit.entry, title: e.target.value } }) }),
+          h('textarea', { 'aria-label': '经验内容', value: edit.entry.body, rows: 8, maxLength: edit.entry.kind === 'skill' ? 5000 : 1000, style: inputStyle,
+            onChange: e => setEdit({ ...edit, entry: { ...edit.entry, body: e.target.value } }) }),
+          h('label', null, '确认程度 ', h('select', { style: inputStyle, value: edit.entry.certainty,
+            onChange: e => setEdit({ ...edit, entry: { ...edit.entry, certainty: e.target.value } }) },
+          h('option', { value: 'confirmed' }, '已确认'), h('option', { value: 'tentative' }, '待验证'))),
+          saveControl('保存修正', async () => { if ((await act({ action: 'edit', ...edit })).status === 'saved') clearEdit(); }, busy, true), button('放弃修改', clearEdit, busy)),
+        h('form', { style: lineStyle, onSubmit: e => { e.preventDefault(); change({ query }); } },
+          h('select', { 'aria-label': '学习范围', style: inputStyle, value: filters.sourceId, onChange: e => change({ sourceId: e.target.value }) },
+            ...(catalog?.sources ?? []).map(s => h('option', { key: s.id, value: s.id }, `${s.label} · ${s.platform === 'private-shared' ? '授权私聊共享' : s.platform}`))),
+          h('select', { 'aria-label': '学习类型', style: inputStyle, value: filters.kind, onChange: e => change({ kind: e.target.value }) },
+            h('option', { value: '' }, '全部类型'), ...Object.entries(learningKinds).map(([id, label]) => h('option', { key: id, value: id }, label))),
+          h('input', { type: 'search', placeholder: '搜索学到的内容', 'aria-label': '搜索学习内容', style: inputStyle, value: query, maxLength: 100, onChange: e => setQuery(e.target.value) }),
+          h('button', { style: inputStyle, type: 'submit' }, '搜索'), button('刷新', () => setRefresh(n => n + 1), busy),
+          button('导出 MEMORY.md', () => download(), busy || !filters.sourceId)),
+        !catalog?.sources?.length && h('p', null, '还没有学习记录。正常聊一会儿，或让猫猫记住一种偏好、总结刚完成的方法，再来刷新。'),
+        result?.review && h('p', { style: mutedStyle }, `最近后台总结：${({ learned: '已学到新内容', no_change: '没有需要新增的经验', skipped: '本轮未学习', running: '处理中', failed: '调用失败，下次对话可再总结' })[result.review.outcome] ?? result.review.outcome} · ${timestamp(result.review.at)}`),
+        result?.status === 'ok' && h('p', { role: 'status' }, `${result.total} 条记录；“待验证”的经验使用时仍需结合当前要求。`),
+        result && result.status !== 'ok' && h('p', { role: 'alert' }, '学习记录读取失败，请刷新。'),
+        ...(result?.items ?? []).map(item => h('article', { key: item.id, style: { ...sectionStyle, ...stackStyle, overflowWrap: 'anywhere' } },
+          h('strong', null, item.title),
+          h('div', { style: mutedStyle }, `${learningKinds[item.kind]} · ${item.certainty === 'confirmed' ? '已确认' : '待验证'} · ${memoryStates[item.status] ?? item.status} · 对象 ${item.subject.slice(0, 6)} · v${item.version}`),
+          h('div', { style: { whiteSpace: 'pre-wrap' } }, item.body),
+          item.quote && h('details', null, h('summary', null, '学习依据'), h('p', null, item.quote)),
+          h('div', { style: mutedStyle }, `更新 ${timestamp(item.updated)} · 调用 ${item.used} 次${item.last_used ? ` · 最近使用 ${timestamp(item.last_used)}` : ''}`),
+          h('div', { style: lineStyle }, button('修正', () => setEdit({ sourceId: filters.sourceId, entry: { ...item, ttlDays: item.kind === 'episode' ? 30 : 365 } }), busy || item.status !== 'active' || Boolean(edit)),
+            button('版本记录', async () => { const value = await act({ action: 'history', sourceId: filters.sourceId, id: item.id }); setHistory({ id: item.id, items: value.items ?? [] }); }, busy),
+            button('遗忘', () => setConfirmation({ item }), busy || item.status === 'forgotten'),
+            item.kind === 'skill' && button('导出 SKILL.md', () => download(item.id), busy || item.status !== 'active')),
+          confirmation?.item.id === item.id && h('div', { style: lineStyle }, '遗忘后不再召回，版本记录仍可恢复。',
+            button('确认遗忘', () => act({ action: 'forget', sourceId: filters.sourceId, id: item.id, version: item.version }), busy), button('取消', () => setConfirmation(null), busy)),
+          history?.id === item.id && h('div', { style: stackStyle }, ...history.items.map(old => h('details', { key: old.version },
+            h('summary', null, `v${old.version} · ${timestamp(old.updated)}`), h('p', { style: { whiteSpace: 'pre-wrap' } }, old.body),
+            old.version !== item.version && button(`恢复到 v${old.version}`, () => act({ action: 'restore', sourceId: filters.sourceId, id: item.id, version: item.version, revision: old.version }), busy)))))),
+        result?.status === 'ok' && h('div', { style: lineStyle }, button('上一页', () => change({ page: filters.page - 1 }), !filters.page || busy),
+          h('span', null, `第 ${filters.page + 1} 页`), button('下一页', () => change({ page: filters.page + 1 }), (filters.page + 1) * result.pageSize >= result.total || busy)));
+    }
+
     const memoryKinds = { preference: '偏好', project: '项目', historical_note: '旧资料' };
     const memoryStates = { active: '有效', expired: '已过期', superseded: '已更新', archived: '已归档', forgotten: '已遗忘' };
 
@@ -1237,7 +1350,7 @@ window.__ModuleLoader__.load({
       const platform = platforms.includes(location.platform) ? location.platform : 'feishu';
       const channelTab = location.channelTab ?? 'connection';
       const modelTab = location.modelTab ?? 'chat';
-      const memoryTab = location.memoryTab ?? 'library';
+      const memoryTab = location.memoryTab ?? 'learning';
       const personaTab = location.personaTab ?? 'assignments';
       const activityTab = location.activityTab ?? 'groups';
       const diagnosticPlatform = location.diagnosticPlatform ?? 'qq';
@@ -1337,8 +1450,9 @@ window.__ModuleLoader__.load({
                 onChange: modelTab => go({ modelTab }), dirty: id => draftKeys.some(key => key === `models:${id}` || key.startsWith(`models:${id}:`)) }),
               modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : modelTab === 'web' ? h(WebSettings, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
             view === 'memory' && h(ReactFragment, null,
-              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['library', '记忆内容'], ['settings', '范围与共享'], ['index', '向量索引']],
-                onChange: memoryTab => go({ memoryTab }), dirty: id => id === 'settings' && dirtyPage('memory') }),
+              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['learning', '自主学习'], ['library', '原有记忆'], ['settings', '范围与共享'], ['index', '向量索引']],
+                onChange: memoryTab => go({ memoryTab }), dirty: id => draftKeys.some(key => key.startsWith('memory:') && draftDestination(key).memoryTab === id) }),
+              memoryTab === 'learning' && h(LearningView, { invoke, drafts }),
               memoryTab === 'library' && h(MemoryView, { invoke, revision }),
               memoryTab === 'settings' && h(ReactFragment, null,
                 h(StatusCard, { title: '当前记忆范围', rows: [['私聊普通记忆', enabled(snapshot.memory.private)],

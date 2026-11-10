@@ -212,20 +212,26 @@ test('the model gets same-group memory, can continue without a name, and obeys t
     }
     await connector.accept(incomingPeer('three', '再来再来！'));
     await delay(25);
-    assert.deepEqual(judged.map((item) => item.rounds), [{ used: 0, limit: 2 }, { used: 1, limit: 2 }]);
+    assert.deepEqual(judged.map((item) => item.rounds), [{ used: 0, remaining: 2, limit: 2 }, { used: 1, remaining: 1, limit: 2 }]);
     assert.deepEqual(judged[0].ordinary_memory, memory);
     assert.deepEqual(sends.map(({ target, extra }) => [target.msgId, extra.msg_seq]), [['human', 1], ['human', 2], ['human', 3]]);
   }, ordinary);
 });
 
-test('a semantic stop or a group command pauses the pair and cancels an already generated reply', async () => {
+test('semantic stop cancels only this exchange while a stop command remains paused', async () => {
   for (const command of [false, true]) {
     const { promise: started, resolve: begin } = Promise.withResolvers();
     const { promise: reply, resolve: finish } = Promise.withResolvers();
+    let stopJudged = false;
     const delivery = { enabled: true, groupAllowlist: ['test-group'],
       peers: { 'test-group': { name: '伙伴', selfName: '团子', waitMs: 1 } } };
-    await withConnector(delivery, async (payload) => payload.mode === 'peer_interrupt'
-      ? { stop: payload.current.text === '你们俩收一收吧' } : { reply: payload.mode === 'peer_banter' },
+    await withConnector(delivery, async (payload) => {
+      if (payload.mode === 'peer_interrupt') {
+        stopJudged = true;
+        return { stop: payload.current.text === '你们俩收一收吧' };
+      }
+      return { reply: payload.mode === 'peer_banter' };
+    },
     { async ask(_envelope, options) {
       if (!options.peerTurn) return '开场喵。';
       begin();
@@ -236,10 +242,21 @@ test('a semantic stop or a group command pauses the pair and cancels an already 
       await connector.accept(incomingPeer('one', '试试反击！'));
       await started;
       await connector.accept(inbound('stop', command ? '/停止互动' : '你们俩收一收吧'));
-      await until(() => connector.peerGroups()[0].paused);
+      await until(() => command ? connector.peerGroups()[0].paused : stopJudged);
+      await delay(20);
+      assert.equal(connector.peerGroups()[0].paused, command);
       finish('已经排队的回嘴');
       await delay(25);
       assert.deepEqual(sends.map(({ target }) => target.msgId), command ? ['human', 'stop'] : ['human']);
+      await connector.accept(incomingPeer('late', '刚才那轮再回一句'));
+      await delay(20);
+      assert.equal(sends.length, command ? 2 : 1);
+      await connector.accept({ ...inbound('new-topic', '我们聊一个新的轻松话题吧'), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+      await until(() => sends.at(-1)?.target.msgId === 'new-topic');
+      const before = sends.length;
+      await connector.accept(incomingPeer('new-peer', '这话题挺有意思！'));
+      if (command) { await delay(30); assert.equal(sends.length, before); }
+      else await until(() => sends.length === before + 1);
     });
   }
 });

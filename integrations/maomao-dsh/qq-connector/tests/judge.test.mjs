@@ -47,3 +47,15 @@ test('shadow judge uses separate no-tools sessions per QQ group and never sends'
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('reply verdicts may choose a human reply form, and only a positive reply may carry one', async () => {
+  const { passiveForm } = await import('../harness.mjs');
+  assert.deepEqual(parseJudgment('{"reply":true,"form":"sticker"}'), { reply: true, form: 'sticker' });
+  assert.deepEqual(parseJudgment('{"reply":true,"form":"brief"}'), { reply: true, form: 'brief' });
+  assert.throws(() => parseJudgment('{"reply":true,"form":"essay"}'), /invalid_verdict/);
+  assert.throws(() => parseJudgment('{"reply":false,"form":"brief"}'), /invalid_verdict/);
+  assert.throws(() => parseJudgment('{"stop":true,"form":"brief"}', 'stop'), /invalid_verdict/);
+  assert.match(passiveForm('sticker', true), /表情包/);
+  assert.doesNotMatch(passiveForm('sticker', false), /表情包/);
+  assert.match(passiveForm(undefined, true), /一两句/);
+});

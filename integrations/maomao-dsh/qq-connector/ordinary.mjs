@@ -89,8 +89,8 @@ export class OrdinaryBridge {
     return child;
   }
 
-  observe(envelope) {
-    return this.media('observe', envelope);
+  observe(envelope, options = {}) {
+    return this.media('observe', envelope, options);
   }
 
   async media(op, envelope, args = {}) {
@@ -98,7 +98,7 @@ export class OrdinaryBridge {
     if (!envelope || envelope.channel !== 'qq' || !['group', 'c2c'].includes(envelope.scope)) {
       throw new Error('ordinary_qq_only');
     }
-    const models = this.#embedding && ['remember_image', 'sticker_candidates'].includes(op) ? this.#modelSelection?.() : null;
+    const models = this.#embedding && ['remember_image', 'sticker_candidates', 'sticker_tool'].includes(op) ? this.#modelSelection?.() : null;
     if (models?.mediaChoice?.('embedding')) {
       args = { ...args, embeddingOverride: await models.embedding().catch(() => null) };
     }

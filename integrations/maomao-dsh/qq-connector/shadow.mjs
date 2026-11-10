@@ -3,6 +3,7 @@ import { appendFile, chmod, mkdir, readFile, rename, stat, writeFile } from 'nod
 import { dirname } from 'node:path';
 import { setTimeout as wait } from 'node:timers/promises';
 import { plainQqMarkdown } from './markdown.mjs';
+import { GROUP_REPLY_MS } from './state.mjs';
 
 const CONTEXT_MS = 8 * 60_000;
 const FOLLOWUP_MS = 5 * 60_000;
@@ -11,7 +12,6 @@ const REPLY_GAP_MS = 4_000;
 const HOUR_MS = 60 * 60_000;
 const PEER_SETTLE_MS = 1_500;
 const MAX_PEER_RECHECKS = 2;
-const PEER_BANTER_WINDOW_MS = 60_000;
 const NAME_HINT = /猫猫|lxc|小猫|喵/i;
 const QUESTION_HINT = /[?？]|吗$|么$|呢$|有人(?:知道|懂|会|用过|拍过)|求(?:推荐|助|问)|怎么|为啥|为什么|哪(?:里|儿|个|款)|是什么|是啥|啥鸟|什么鸟|有多/;
 
@@ -112,8 +112,8 @@ export class PassiveShadow {
       state.pending = null;
     }
     state.interrupt = previousInterrupt;
-    if (peer && !peer.paused && onPeerStop && this.#judge && envelope.text.trim()
-      && (hadPeerJob || state.lastPeerBanterAt !== null && now - state.lastPeerBanterAt <= PEER_BANTER_WINDOW_MS)) {
+    if (peer && !peer.paused && this.#judge && envelope.text.trim()
+      && (hadPeerJob || state.lastPeerBanterAt !== null && now - state.lastPeerBanterAt <= GROUP_REPLY_MS)) {
       const payload = {
         mode: 'peer_interrupt',
         recent_messages: this.contextFor(envelope),
@@ -124,7 +124,8 @@ export class PassiveShadow {
         const verdict = await this.#judge(payload, envelope);
         if (verdict?.stop !== true || this.#closed) return false;
         this.cancelPeer(envelope);
-        await onPeerStop();
+        await this.#audit(envelope, 'peer_interrupt', 'skip', 'semantic_stop_current_exchange');
+        await onPeerStop?.();
         return true;
       }).catch(() => false);
       state.interrupt = interrupt;
@@ -143,19 +144,12 @@ export class PassiveShadow {
       : named ? 'named' : followup ? 'followup' : 'unsolicited';
     const canJudge = allowJudgment || peer && !peer.paused;
     if (!canJudge) return this.#audit(envelope, mode, 'candidate', 'semantic_judge_unavailable');
-    if (state.botAt && now - state.botAt < REPLY_GAP_MS) {
-      return this.#audit(envelope, mode, 'skip', 'reply_gap');
-    }
+    // Coalesce a fast followup instead of silently dropping it before judgment.
+    const settleMs = state.botAt ? Math.max(0, REPLY_GAP_MS - (now - state.botAt)) : 0;
     const interjection = mode === 'unsolicited';
-    if (interjection) {
-      state.openers = state.openers.filter((at) => now - at < HOUR_MS);
-      const owner = this.#ownerIds.has(envelope.senderId) || this.#isOwner(envelope);
-      const cooldown = owner ? 3 * 60_000 : 10 * 60_000;
-      if (now - Math.max(state.lastOpen, state.botAt) < cooldown) {
-        return this.#audit(envelope, mode, 'skip', 'cooldown');
-      }
-      if (state.openers.length >= 5) return this.#audit(envelope, mode, 'skip', 'hourly');
-    }
+    // Activity informs the model; a fixed multi-minute silence must not hide a
+    // new invitation. Delivery quotas, debounce and peer round limits still apply.
+    state.openers = state.openers.filter((at) => now - at < HOUR_MS);
 
     const version = state.version;
     const payload = () => Object.freeze({ mode, fresh_start: state.gap >= TOPIC_GAP_MS,
@@ -163,6 +157,8 @@ export class PassiveShadow {
       current: { speaker: digest(envelope.senderId), text: oneLine(envelope.text),
         ...(hasReferencedImage ? { recent_image_available: true } : {}) },
       seconds_since_cat_reply: state.botAt ? Math.floor((this.#clock() - state.botAt) / 1000) : null,
+      recent_interjections: state.openers.length,
+      current_is_owner: this.#ownerIds.has(envelope.senderId) || this.#isOwner(envelope),
       same_recipient: Boolean(envelope.senderId && envelope.senderId === state.recipient) });
     const task = new Promise((resolve) => {
       const timer = setTimeout(async () => {
@@ -197,11 +193,12 @@ export class PassiveShadow {
             state.openers.push(state.lastOpen);
           }
           const reason = reply ? 'semantic_yes' : 'semantic_no';
-          resolve(await this.#audit(envelope, mode, reply ? 'would_reply' : 'skip', rechecks ? `${reason}_after_peer` : reason));
+          const row = await this.#audit(envelope, mode, reply ? 'would_reply' : 'skip', rechecks ? `${reason}_after_peer` : reason);
+          resolve(reply && verdict.form ? { ...row, form: verdict.form } : row);
         } catch {
           resolve(await this.#audit(envelope, mode, 'skip', 'judge_error'));
         }
-      }, mode === 'group_interjection' ? Math.max(this.#delay, peer.waitMs ?? 3_000) : this.#delay);
+      }, Math.max(settleMs, mode === 'group_interjection' ? Math.max(this.#delay, peer.waitMs ?? 3_000) : this.#delay));
       state.pending = { timer, resolve };
     });
     state.humanJudging = envelope;
@@ -232,7 +229,11 @@ export class PassiveShadow {
     const anchor = state.latestHuman;
     const audit = (decision, reason) =>
       this.#audit({ ...group, receiptKey: `qq:${botId}:group:${chatId}:${messageId}` }, 'peer_banter', decision, reason);
-    if (!anchor || state.humanJudging === anchor || now - anchor.receivedAt > PEER_BANTER_WINDOW_MS) return null;
+    if (!anchor || state.humanJudging === anchor) return null;
+    if (now - anchor.receivedAt > GROUP_REPLY_MS) {
+      await audit('skip', 'qq_reply_window_expired');
+      return null;
+    }
     if (state.peerRounds >= peer.maxRounds) {
       await audit('skip', 'banter_limit');
       return null;
@@ -240,7 +241,7 @@ export class PassiveShadow {
     const job = {};
     state.peerJob = job;
     const release = () => { if (state.peerJob === job) state.peerJob = null; };
-    const expiresAt = anchor.receivedAt + PEER_BANTER_WINDOW_MS;
+    const expiresAt = anchor.receivedAt + GROUP_REPLY_MS;
     const current = () => state.peerJob === job && this.isLatest(anchor) && this.#clock() <= expiresAt && enabled();
     let selected = false;
     try {
@@ -257,7 +258,7 @@ export class PassiveShadow {
         memory = await recall?.(anchor, turn.text);
         if (!current()) return null;
         verdict = await this.#judge({ mode: 'peer_banter',
-          rounds: { used: state.peerRounds, limit: peer.maxRounds },
+          rounds: { used: state.peerRounds, remaining: peer.maxRounds - state.peerRounds, limit: peer.maxRounds },
           recent_messages: this.contextFor({ ...anchor, messageId: latest.messageId }),
           ordinary_memory: memory ?? null, current: { role: 'participant', speaker: turn.speaker, text: turn.text } }, anchor);
         if (!current()) return null;

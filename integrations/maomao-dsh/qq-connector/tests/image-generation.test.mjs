@@ -67,7 +67,7 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
   let finishRun;
   let terminated = false;
   const tools = { register(value, options) {
-    assert.equal(value.name, 'maomao_generate_image');
+    if (value.name !== 'maomao_generate_image') return () => {};
     definition = value;
     activation = options.when;
     return () => { definition = undefined; };

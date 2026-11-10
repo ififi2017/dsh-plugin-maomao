@@ -5,8 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 
 export const CAT_PERSONA = 'maomao';
 const cat = { id: CAT_PERSONA, name: '猫猫', prompt: '', revision: 'cat-v1', updated: 0 };
-const catDescription = readFileSync(new URL('../maomao-companion/persona.md', import.meta.url), 'utf8')
-  .replace(/^<!--[^\n]*-->\s*/, '').trim();
+export const catDescription = readFileSync(new URL('../maomao-companion/persona.md', import.meta.url), 'utf8')
+  .replace(/^<!--[^\n]*-->\s*/, '')
+  .split(/^## 运行规则\s*$/m, 1)[0].trim();
 const identity = /^[a-f0-9]{64}$/;
 
 export class ChannelPersonas {

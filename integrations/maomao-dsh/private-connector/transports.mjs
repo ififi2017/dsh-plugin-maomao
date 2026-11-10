@@ -48,7 +48,8 @@ async function imageFrom(response) {
   const bytes = Buffer.concat(chunks, length);
   const mediaType = bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex')) ? 'image/png'
     : bytes.subarray(0, 3).equals(Buffer.from('ffd8ff', 'hex')) ? 'image/jpeg'
-      : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp' : null;
+      : bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp'
+        : /^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6)) ? 'image/gif' : null;
   if (!mediaType) throw safeError(length ? 'private_media_format' : 'private_media_empty');
   return { type: 'image', mediaType, data: bytes.toString('base64'), name: 'private-image' };
 }
@@ -128,11 +129,13 @@ export class TelegramTransport {
   async replyMedia(event, media, _ticket, signal, current = () => true) {
     if (!current() || signal.aborted) return null;
     const voice = media.kind === 'voice';
+    const animation = !voice && media.mediaType === 'image/gif';
+    const sticker = !voice && !animation && media.kind === 'sticker' && ['image/webp', 'image/png'].includes(media.mediaType);
     const form = new FormData();
     form.set('chat_id', event.chatId);
     form.set('reply_parameters', JSON.stringify({ message_id: Number(event.messageId) }));
-    form.set(voice ? 'voice' : 'photo', new Blob([media.buffer], { type: media.mediaType }), media.fileName);
-    const sent = await this.#call(voice ? 'sendVoice' : 'sendPhoto', form, signal, 30_000);
+    form.set(voice ? 'voice' : animation ? 'animation' : sticker ? 'sticker' : 'photo', new Blob([media.buffer], { type: media.mediaType }), media.fileName);
+    const sent = await this.#call(voice ? 'sendVoice' : animation ? 'sendAnimation' : sticker ? 'sendSticker' : 'sendPhoto', form, signal, 30_000);
     return positiveId(sent?.message_id) ? String(sent.message_id) : null;
   }
 

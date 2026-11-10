@@ -27,7 +27,7 @@ test('commands require a directly addressed exact command and keep IDs inert', (
   assert.equal(qqCommand({ addressed: false, text: '<@1234567890abcdef1234567890abcdef> /sid' }), null);
   assert.equal(qqCommand({ addressed: true, text: '/sid please' }), null);
   assert.equal(sidReply({ senderId: 'member\nspoof', scope: 'group', chatId: 'group-one' }),
-    'QQ 发送者 OpenID：不可用\nQQ群 OpenID：group-one');
+    'QQ 发送者 OpenID：不可用\nQQ群 OpenID：group-one\n本群主人身份：未绑定\n在本群 @猫猫 发送 /pair 查看主人绑定方法。');
   assert.match(statusReply({ ready: true }), /API 剩余额度：当前模型接口未提供统一查询/);
 });
 
@@ -78,6 +78,11 @@ test('/sid and /status use trusted envelope and recorded projections without mod
     await connector.accept(message('three', '/sid', false));
     await delay(10);
     assert.equal(sent.length, 2);
+    const beforePair = observed;
+    await connector.accept(message('pair-help', '/pair'));
+    assert.match(sent.at(-1).content, /QQ群主人身份/);
+    assert.equal(observed, beforePair);
+    assert.equal(turns, 0);
     await connector.stop();
   } finally {
     [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT] = old;
@@ -107,6 +112,10 @@ test('unmentioned QQ persona commands are group scoped and require a bound owner
     harness: { async ask() { assert.fail('slash command went to the model'); } } });
   await connector.start();
   try {
+    await connector.accept(message('owner-sid', '/sid'));
+    await until(() => sent.some(text => text.includes('本群主人身份：已验证')));
+    await connector.accept({ ...message('other-sid', '/sid'), senderId: 'other-member' });
+    await until(() => sent.some(text => text.includes('本群主人身份：未绑定')));
     await connector.accept({ ...message('one', '/切换人设 小舟', false), senderId: 'other-member' });
     assert.match(sent.at(-1), /群主人/);
     assert.equal(book.current(target).id, 'maomao');
