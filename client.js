@@ -55,11 +55,13 @@ window.__ModuleLoader__.load({
     };
     const inputStyle = { ...sectionStyle, padding: '5px 9px', fontSize: 13, maxWidth: '100%', background: 'transparent' };
     const lineStyle = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' };
-    const button = (label, onClick, disabled) => h('button', { type: 'button', style: inputStyle, onClick, disabled }, label);
+    // HIG: one prominent action per step, destructive actions look destructive.
+    const variants = { primary: 'maomao-primary', destructive: 'maomao-destructive', confirmDestructive: 'maomao-destructive maomao-confirm' };
+    const button = (label, onClick, disabled, variant) => h('button', { type: 'button', style: inputStyle, className: variants[variant], onClick, disabled }, label);
     const unsavedStyle = { ...inputStyle, background: 'rgba(224, 154, 30, 0.22)', borderColor: '#b8791f', fontWeight: 650 };
     const saveControl = (label, onClick, disabled, dirty, type = 'button') => h('div', { style: lineStyle },
-      h('button', { type, style: dirty ? unsavedStyle : inputStyle, onClick, disabled }, label),
-      h('span', { role: 'status', style: { fontWeight: 600 } }, dirty ? '未保存' : ''));
+      h('button', { type, style: inputStyle, className: dirty ? variants.primary : undefined, onClick, disabled }, label),
+      h('span', { role: 'status', className: 'maomao-unsaved' }, dirty ? '未保存' : ''));
     const timestamp = (at) => new Date(at).toLocaleString('zh-CN');
 
     const stackStyle = { display: 'grid', gap: 14, minWidth: 0 };
@@ -91,36 +93,47 @@ window.__ModuleLoader__.load({
       const [expanded, setOpen] = useState(initial);
       const open = forceOpen || expanded;
       return h('div', { style: stackStyle },
-        h('button', { type: 'button', style: { ...inputStyle, textAlign: 'left' }, 'aria-expanded': open,
+        h('button', { type: 'button', className: 'maomao-disclosure', 'aria-expanded': open,
           onClick: () => setOpen(!open) }, `${open ? '▾' : '▸'} ${title}`),
         h('div', { hidden: !open }, children));
     }
     const panelCss = `
-      .maomao-panel { container-type:inline-size; font-size:13px; line-height:1.55; }
+      .maomao-panel { container-type:inline-size; font-size:13px; line-height:1.55;
+        --maomao-accent:#7a62c9; --maomao-tint:rgba(139,115,210,.14); --maomao-danger:#c4372d; --maomao-warn:#b8791f; }
+      /* Form controls follow the host theme instead of the browser default black text. */
+      .maomao-panel input, .maomao-panel select, .maomao-panel textarea { color:inherit; font:inherit; }
+      .maomao-panel option { color:CanvasText; background-color:Canvas; }
+      /* !important: these buttons also carry the shared inline control style. */
+      .maomao-panel button.maomao-primary:not(:disabled) { background:var(--maomao-accent) !important; color:#fff; border-color:transparent !important; font-weight:600; }
+      .maomao-panel button.maomao-destructive { border-color:var(--maomao-danger) !important; background:rgba(196,55,45,.1) !important; }
+      .maomao-panel button.maomao-destructive.maomao-confirm:not(:disabled) { background:var(--maomao-danger) !important; color:#fff; border-color:transparent !important; font-weight:600; }
+      .maomao-panel .maomao-unsaved { font-weight:600; color:var(--maomao-warn); }
+      .maomao-panel summary { cursor:pointer; padding:4px 0; }
+      .maomao-panel .maomao-disclosure { border:0; background:transparent; padding:4px 0; text-align:left; font-weight:600; color:var(--maomao-accent); width:fit-content; }
       .maomao-panel *, .maomao-panel *::before, .maomao-panel *::after { box-sizing:border-box; }
       .maomao-panel [hidden] { display:none !important; }
       .maomao-panel button { cursor:pointer; color:inherit; }
       .maomao-panel button:disabled { cursor:default; opacity:.5; }
       .maomao-panel button:focus-visible, .maomao-panel input:focus-visible,
-      .maomao-panel select:focus-visible, .maomao-panel textarea:focus-visible { outline:2px solid #8d77d5; outline-offset:3px; }
+      .maomao-panel select:focus-visible, .maomao-panel textarea:focus-visible { outline:2px solid var(--maomao-accent); outline-offset:3px; }
       .maomao-panel textarea { width:100%; resize:vertical; line-height:1.65; }
       .maomao-panel select { min-width:0; text-overflow:ellipsis; }
       .maomao-layout { display:grid; grid-template-columns:142px minmax(0,1fr); gap:24px; align-items:start; }
       .maomao-nav { display:grid; gap:18px; position:sticky; top:8px; }
       .maomao-nav-group { display:grid; gap:4px; }
-      .maomao-nav-label { font-size:11px; opacity:.55; padding:0 10px 3px; }
+      .maomao-nav-label { font-size:12px; opacity:.72; padding:0 10px 3px; }
       .maomao-nav button { border:0; background:transparent; border-radius:9px; text-align:left; padding:9px 10px; font-size:13px; }
-      .maomao-nav button.selected { background:rgba(139,115,210,.14); font-weight:650; }
+      .maomao-nav button.selected { background:var(--maomao-tint); font-weight:650; }
       .maomao-nav button:hover, .maomao-subnav button:hover { background:rgba(139,115,210,.09); }
       .maomao-subnav { display:flex; flex-wrap:wrap; gap:4px; border-bottom:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); padding-bottom:9px; }
       .maomao-subnav button { font-size:13px; border:0; border-radius:7px; padding:6px 10px; background:transparent; }
       .maomao-subnav button.selected { background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.12)); font-weight:650; }
-      .maomao-draft-dot { color:#b8791f; font-size:11px; }
+      .maomao-draft-dot { color:var(--maomao-warn); font-size:12px; }
       .maomao-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr)); gap:10px; }
       .maomao-channels { grid-template-columns:repeat(3,minmax(0,1fr)); }
       @container (max-width:420px) { .maomao-channels { grid-template-columns:minmax(0,1fr); } }
       .maomao-channel { border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); border-radius:12px; padding:13px; text-align:left; background:transparent; display:grid; gap:5px; }
-      .maomao-channel.selected { border-color:#9380c7; background:rgba(139,115,210,.08); }
+      .maomao-channel.selected { border-color:var(--maomao-accent); background:rgba(139,115,210,.08); }
       .maomao-status { display:inline-flex; gap:6px; align-items:center; font-size:12px; }
       .maomao-status::before { content:''; width:6px; height:6px; border-radius:50%; background:#999; }
       .maomao-status.ready::before { background:#53a47c; }
@@ -252,7 +265,7 @@ window.__ModuleLoader__.load({
           h('div', { style: lineStyle },
             button(mode === 'scan' ? '生成授权二维码' : '验证并连接', () => submit('start'),
               busy || !exclusive || (needsSecret && !secret.trim()) ||
-              (mode === 'import' && platform !== 'telegram' && !account.trim())),
+              (mode === 'import' && platform !== 'telegram' && !account.trim()), 'primary'),
             activeConnection(job) && job.state !== 'saving' && button('取消授权', () => submit('cancel'), sending)),
           job?.qr && h('div', { style: { display: 'grid', gap: 6, justifyItems: 'start' } },
             job.qr.image && h('img', { alt: '平台授权二维码', width: 210, height: 210, src: job.qr.image }),
@@ -362,7 +375,7 @@ window.__ModuleLoader__.load({
             !relink && h('option', { value: 'new' }, '这是另一个人 · 建立独立记忆'),
             owners.map((item) => h('option', { key: item.id, value: item.id }, `这是同一个人 · ${ownerSummary(item)}`)))),
           !pairing && button(relink ? '生成关联指令' : '生成配对指令', () => pair('start'),
-            restoring || pending || (needsOwnerChoice && !ownerChoice)),
+            restoring || pending || (needsOwnerChoice && !ownerChoice), 'primary'),
           relink && !pairing && button('返回', closeRelink, pending)),
         online && !pairing && needsOwnerChoice && !relink && h('p', { style: { margin: 0 } },
           '关联已有主人后，两端在开启共享时可读取同一份普通记忆。另一人使用独立的记忆。'),
@@ -391,7 +404,7 @@ window.__ModuleLoader__.load({
             h('input', { 'aria-label': '配对确认码', style: { ...inputStyle, width: 145 }, value: proof,
               placeholder: '8 字符确认码', autoComplete: 'off', spellCheck: false, maxLength: 8,
               onChange: (event) => setProof(event.target.value) }),
-            button(requestedRelink ? '确认关联' : '确认绑定', () => pair('confirm'), pending || !/^[a-f0-9]{8}$/i.test(proof.trim())),
+            button(requestedRelink ? '确认关联' : '确认绑定', () => pair('confirm'), pending || !/^[a-f0-9]{8}$/i.test(proof.trim()), 'primary'),
             button('取消', () => pair('cancel'), pending))),
         notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
     }
@@ -449,11 +462,11 @@ window.__ModuleLoader__.load({
             h('code', { style: { overflowWrap: 'anywhere', display: 'block', fontSize: 12 } }, route.groupOpenId ? `群 OpenID：${route.groupOpenId}`
               : route.userOpenId ? `用户 OpenID：${route.userOpenId}` : `绑定 ID：${route.id}`)),
           h('div', { style: lineStyle }, selected === route.id
-            ? h(ReactFragment, null, button('确认解绑', () => remove(route), busy),
+            ? h(ReactFragment, null, button('确认解绑', () => remove(route), busy, 'confirmDestructive'),
               button('取消解绑', () => setSelected(null), busy))
             : h(ReactFragment, null,
               canRelink(route) && button('关联同一主人', () => onRelink(route), busy),
-              button('解绑', () => { setNotice(''); setSelected(route.id); }, busy))))),
+              button('解绑', () => { setNotice(''); setSelected(route.id); }, busy, 'destructive'))))),
         notice && h('p', { role: 'status', style: { margin: 0 } }, notice),
         owners.some(owner => owner.channels.includes(platform)) && h(ReactFragment, null,
           h('h4', { style: { margin: '8px 0 0' } }, '私聊主人与记忆归属'),
@@ -627,7 +640,7 @@ window.__ModuleLoader__.load({
           'aria-pressed': selected === platform, onClick: () => onSelect(platform) },
           h('strong', { style: { fontSize: 14 } }, destinations[platform]),
           h('span', { className: `maomao-status ${state}` }, states[state]),
-          h('span', { style: { opacity: 0.65, fontSize: 12 } }, count ? `${count} 个已绑定会话` : '尚未绑定会话'));
+          h('span', { style: { opacity: 0.72, fontSize: 12 } }, count ? `${count} 个已绑定会话` : '尚未绑定会话'));
       }));
     }
 
@@ -1057,6 +1070,8 @@ window.__ModuleLoader__.load({
     }
 
     const learningKinds = { profile: '对象档案', episode: '经历与待办', skill: '可复用技能', style: '语气与互动习惯', meme: '梗知识', followup: '惦记的事', diary: '猫猫日记' };
+    const learningPlatforms = { desktop: '桌面', private: '私聊', 'private-shared': '授权私聊共享', qq: 'QQ', feishu: 'Lark / 飞书', telegram: 'Telegram' };
+    const learningTtl = { episode: 30, followup: 14, diary: 60 };
     const learningResults = { saved: '已保存', failed: '操作失败，请重试', conflict: '这条内容刚有更新，请刷新后再修改',
       invalid: '内容或参数不符合要求', missing: '这条内容已不可用', unavailable: '学习服务尚未就绪', forgotten: '已遗忘，请从版本记录恢复' };
     function LearningView({ invoke, drafts }) {
@@ -1139,7 +1154,7 @@ window.__ModuleLoader__.load({
           saveControl('保存修正', async () => { if ((await act({ action: 'edit', ...edit })).status === 'saved') clearEdit(); }, busy, true), button('放弃修改', clearEdit, busy)),
         h('form', { style: lineStyle, onSubmit: e => { e.preventDefault(); change({ query }); } },
           h('select', { 'aria-label': '学习范围', style: inputStyle, value: filters.sourceId, onChange: e => change({ sourceId: e.target.value }) },
-            ...(catalog?.sources ?? []).map(s => h('option', { key: s.id, value: s.id }, `${s.label} · ${s.platform === 'private-shared' ? '授权私聊共享' : s.platform}`))),
+            ...(catalog?.sources ?? []).map(s => h('option', { key: s.id, value: s.id }, [s.label, learningPlatforms[s.platform] ?? s.platform].filter((part, i, all) => i === 0 || !all[0].includes(part)).join(' · ')))),
           h('select', { 'aria-label': '学习类型', style: inputStyle, value: filters.kind, onChange: e => change({ kind: e.target.value }) },
             h('option', { value: '' }, '全部类型'), ...Object.entries(learningKinds).map(([id, label]) => h('option', { key: id, value: id }, label))),
           h('input', { type: 'search', placeholder: '搜索学到的内容', 'aria-label': '搜索学习内容', style: inputStyle, value: query, maxLength: 100, onChange: e => setQuery(e.target.value) }),
@@ -1149,21 +1164,22 @@ window.__ModuleLoader__.load({
         result?.review && h('p', { style: mutedStyle }, `最近后台总结：${({ learned: '已学到新内容', no_change: '没有需要新增的经验', skipped: '本轮未学习', running: '处理中', failed: '调用失败，下次对话可再总结' })[result.review.outcome] ?? result.review.outcome} · ${timestamp(result.review.at)}`),
         result?.status === 'ok' && h('p', { role: 'status' }, `${result.total} 条记录；“待验证”的经验使用时仍需结合当前要求。`),
         result && result.status !== 'ok' && h('p', { role: 'alert' }, '学习记录读取失败，请刷新。'),
-        ...(result?.items ?? []).map(item => h('article', { key: item.id, style: { ...sectionStyle, ...stackStyle, overflowWrap: 'anywhere' } },
+        // Speakers are stored as hashes; only distinguish them when a group scope has several.
+        ...(result?.items ?? []).map((item, _i, items) => h('article', { key: item.id, style: { ...sectionStyle, ...stackStyle, overflowWrap: 'anywhere' } },
           h('strong', null, item.title),
-          h('div', { style: mutedStyle }, `${learningKinds[item.kind]} · ${item.certainty === 'confirmed' ? '已确认' : '待验证'} · ${memoryStates[item.status] ?? item.status} · 对象 ${item.subject.slice(0, 6)} · v${item.version}`),
+          h('div', { style: mutedStyle }, `${learningKinds[item.kind]} · ${item.certainty === 'confirmed' ? '已确认' : '待验证'} · ${memoryStates[item.status] ?? item.status}${new Set(items.map(row => row.subject)).size > 1 ? ` · 发言者 ${[...new Set(items.map(row => row.subject))].indexOf(item.subject) + 1}` : ''} · 第 ${item.version} 版`),
           h('div', { style: { whiteSpace: 'pre-wrap' } }, item.body),
           item.quote && h('details', null, h('summary', null, '学习依据'), h('p', null, item.quote)),
           h('div', { style: mutedStyle }, `更新 ${timestamp(item.updated)} · 调用 ${item.used} 次${item.last_used ? ` · 最近使用 ${timestamp(item.last_used)}` : ''}`),
-          h('div', { style: lineStyle }, button('修正', () => setEdit({ sourceId: filters.sourceId, entry: { ...item, ttlDays: item.kind === 'episode' ? 30 : 365 } }), busy || item.status !== 'active' || Boolean(edit)),
+          h('div', { style: lineStyle }, button('修正', () => setEdit({ sourceId: filters.sourceId, entry: { ...item, ttlDays: learningTtl[item.kind] ?? 365 } }), busy || item.status !== 'active' || Boolean(edit)),
             button('版本记录', async () => { const value = await act({ action: 'history', sourceId: filters.sourceId, id: item.id }); setHistory({ id: item.id, items: value.items ?? [] }); }, busy),
-            button('遗忘', () => setConfirmation({ item }), busy || item.status === 'forgotten'),
+            button('遗忘', () => setConfirmation({ item }), busy || item.status === 'forgotten', 'destructive'),
             item.kind === 'skill' && button('导出 SKILL.md', () => download(item.id), busy || item.status !== 'active')),
           confirmation?.item.id === item.id && h('div', { style: lineStyle }, '遗忘后不再召回，版本记录仍可恢复。',
-            button('确认遗忘', () => act({ action: 'forget', sourceId: filters.sourceId, id: item.id, version: item.version }), busy), button('取消', () => setConfirmation(null), busy)),
+            button('确认遗忘', () => act({ action: 'forget', sourceId: filters.sourceId, id: item.id, version: item.version }), busy, 'confirmDestructive'), button('取消', () => setConfirmation(null), busy)),
           history?.id === item.id && h('div', { style: stackStyle }, ...history.items.map(old => h('details', { key: old.version },
-            h('summary', null, `v${old.version} · ${timestamp(old.updated)}`), h('p', { style: { whiteSpace: 'pre-wrap' } }, old.body),
-            old.version !== item.version && button(`恢复到 v${old.version}`, () => act({ action: 'restore', sourceId: filters.sourceId, id: item.id, version: item.version, revision: old.version }), busy)))))),
+            h('summary', null, `第 ${old.version} 版 · ${timestamp(old.updated)}`), h('p', { style: { whiteSpace: 'pre-wrap' } }, old.body),
+            old.version !== item.version && button(`恢复到第 ${old.version} 版`, () => act({ action: 'restore', sourceId: filters.sourceId, id: item.id, version: item.version, revision: old.version }), busy)))))),
         result?.status === 'ok' && h('div', { style: lineStyle }, button('上一页', () => change({ page: filters.page - 1 }), !filters.page || busy),
           h('span', null, `第 ${filters.page + 1} 页`), button('下一页', () => change({ page: filters.page + 1 }), (filters.page + 1) * result.pageSize >= result.total || busy)));
     }
@@ -1402,7 +1418,7 @@ window.__ModuleLoader__.load({
         h('style', null, panelCss),
         h('header', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 } },
           h('div', { style: lineStyle }, h(CatIcon, { size: 26 }),
-            h('strong', { style: { fontSize: 16 } }, '猫猫'), h('span', { style: { opacity: 0.6, fontSize: 12 } }, '控制面板')),
+            h('strong', { style: { fontSize: 16 } }, '猫猫'), h('span', { style: { opacity: 0.72, fontSize: 12 } }, '控制面板')),
           button(state.pending ? '刷新中…' : '刷新状态', onChange, state.pending)),
         state.error && h('p', { role: 'alert', style: { margin: 0 } }, state.error),
         !snapshot && h('p', { role: 'status', style: { margin: 0 } }, '正在读取状态…'),
