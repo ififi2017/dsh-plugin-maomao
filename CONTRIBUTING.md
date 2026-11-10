@@ -23,7 +23,7 @@ npm ci --ignore-scripts
 npm test
 npm run pack:release
 export DSH_HOME="$(mktemp -d)"
-dsh plugin --profile web add ./maomao-dsh-panel-0.2.26.tgz
+dsh plugin --profile web add ./maomao-dsh-panel-0.2.27.tgz
 dsh --profile web --dump-config
 dsh web --host 127.0.0.1
 ```

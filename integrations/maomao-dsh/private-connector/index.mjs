@@ -8,6 +8,7 @@ import { provisionFeishu } from './setup-feishu.mjs';
 import { provisionTelegram } from './setup-telegram.mjs';
 import { telegramBotId } from './telegram-api.mjs';
 import { choiceGuidance, parseChoiceData, parseChoiceReply } from '../choices.mjs';
+import { hasMarkdownFence } from '../message-markdown.mjs';
 import { catDescription, channelPersona, mountChannelPersona } from '../personas.mjs';
 import { completeText, parseJsonReply } from '../model-call.mjs';
 import { clock } from '../learning.mjs';
@@ -86,7 +87,7 @@ function answerFrom(result) {
 }
 
 function bubbles(text) {
-  if (text.includes('```')) return [limitText(text.replaceAll('<|bubble|>', '\n\n'))];
+  if (hasMarkdownFence(text)) return [limitText(text.replaceAll('<|bubble|>', '\n\n'))];
   const parts = text.replace(/(?:<\|){2,}bubble\|>/g, '<|bubble|>').split('<|bubble|>').map((part) => part.trim()).filter(Boolean);
   return [...parts.slice(0, 2), parts.slice(2).join('\n\n')].filter(Boolean).map(limitText);
 }

@@ -8,9 +8,9 @@
 - **聊天平台**：在面板里接入自己的 Bot、绑定会话，再验证首条回复。
 - **按需扩展**：单独配置模型、普通记忆、人格、媒体与主动分享。基础文字聊天可以跟随 DSH 默认模型。
 
-## 自主学习（开发版）
+## 自主学习
 
-此功能尚未包含在 npm `0.2.26` 中。开发版在「设置 → 猫猫 → 记忆 → 自主学习」管理，默认开启，可单独关闭回复后的后台总结。
+在「设置 → 猫猫 → 记忆 → 自主学习」管理，默认开启，可单独关闭回复后的后台总结。
 
 猫猫可以在普通聊天中自行判断哪些内容值得记住：对象的偏好与习惯、带时间的经历与待办，以及可复用的任务方法。比如反复调整插画后，可以把构图、透明背景和检查方法整理成技能，下一次相关任务先加载再使用。是否形成经验由对话模型判断，不要求固定句式或累计固定次数；“调用工具成功”不代表用户认可，尚不确定的经验应标为「待验证」。
 
@@ -30,22 +30,24 @@
 
 验证方式：让猫猫记住一个普通偏好，再开新会话询问；让她总结刚完成的工作方法，再换一个相关任务看是否调用技能；纠正内容后确认新会话采用修正版，并检查另一个 QQ 群不出现这份记录。日常对话仍会受模型判断影响，可通过面板纠正遗漏或误记。
 
+飞书 / Lark 使用富文本发送 Markdown，可显示粗体、引用和列表。QQ 优先使用原生 Markdown，平台明确拒绝时回退为纯文本。
+
 ## 安装
 
 目前验证的 DSH 版本为 **`0.2.2-rc.1`**。请先在 DSH 的模型设置中准备一个可用的对话模型。使用外部渠道的记忆和分享功能时，还需要系统可调用的 Python 3。QQ 表情缩略图需要 [Pillow](https://pillow.readthedocs.io/)。
 
-在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.26`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
+在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.27`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
 
-Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.26)
+Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.27)
 
 ```sh
-dsh plugin --profile web add maomao-dsh-panel@0.2.26
+dsh plugin --profile web add maomao-dsh-panel@0.2.27
 ```
 
 也可以从 GitHub 安装同一个版本。
 
 ```sh
-dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.26'
+dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.27'
 ```
 
 重启后打开「设置 → 猫猫 → 总览」。只在 DSH 聊天的话，直接在新会话的模式菜单选「猫猫」，发一句「猫猫你好」。

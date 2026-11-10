@@ -2,6 +2,7 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { feishuInbound, telegramInbound } from './identity.mjs';
 import { identifyTelegramBot, telegramBotId, telegramCall } from './telegram-api.mjs';
 import { choiceData, parseChoiceData } from '../choices.mjs';
+import { hasChatMarkdown, plainChatMarkdown } from '../message-markdown.mjs';
 
 const MAX_IMAGE = 5_000_000;
 const bounded = (signal, ms) => AbortSignal.any([signal, AbortSignal.timeout(ms)]);
@@ -14,7 +15,8 @@ const larkId = (value, prefix) => typeof value === 'string' && value.startsWith(
 const larkCard = (text, options = [], token) => ({
   schema: '2.0',
   body: { elements: [
-    { tag: 'div', text: { tag: 'plain_text', content: text } },
+    hasChatMarkdown(text) ? { tag: 'markdown', content: text }
+      : { tag: 'div', text: { tag: 'plain_text', content: text } },
     ...options.map((label, index) => ({ tag: 'button', type: 'default',
       text: { tag: 'plain_text', content: label },
       behaviors: [{ type: 'callback', value: { choice: choiceData(token, index) } }],
@@ -280,13 +282,29 @@ export class FeishuTransport {
     return response;
   }
 
-  async reply(event, text, ticket, signal) {
-    const response = await this.#request(`/${event.messageId}/reply`, {
-      msg_type: 'text', content: JSON.stringify({ text }), uuid: ticket.slice(0, 40),
-    }, signal);
-    const result = await response.json().catch(() => null);
-    return response.ok && result?.code === 0 && typeof result.data?.message_id === 'string'
-      ? result.data.message_id : null;
+  async #sendText(path, text, ticket, signal, fields = {}) {
+    const uuid = ticket.slice(0, 40);
+    const post = async (msgType, content) => {
+      const response = await this.#request(path, {
+        ...fields, msg_type: msgType, content: JSON.stringify(content), uuid,
+      }, signal);
+      const result = await response.json().catch(() => null);
+      const messageId = response.ok && result?.code === 0 && typeof result.data?.message_id === 'string'
+        ? result.data.message_id : null;
+      return { messageId, formatRejected: response.status === 400 && [230001, 4000].includes(result?.code) };
+    };
+    const plain = plainChatMarkdown(text);
+    if (hasChatMarkdown(text, plain)) {
+      const rich = await post('post', { zh_cn: { content: [[{ tag: 'md', text }]] } });
+      // A lost response may still mean the message was sent. Retry only after a definite bad request.
+      if (rich.messageId || !rich.formatRejected || signal.aborted) return rich.messageId;
+      return (await post('text', { text: plain })).messageId;
+    }
+    return (await post('text', { text })).messageId;
+  }
+
+  reply(event, text, ticket, signal) {
+    return this.#sendText('/' + event.messageId + '/reply', text, ticket, signal);
   }
 
   async replyMedia(event, media, ticket, signal, current = () => true) {
@@ -326,13 +344,8 @@ export class FeishuTransport {
       ? result.data.message_id : null, interactive: true };
   }
 
-  async send(chatId, text, ticket, signal) {
-    const response = await this.#request('?receive_id_type=chat_id', {
-      receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }), uuid: ticket.slice(0, 40),
-    }, signal);
-    const result = await response.json().catch(() => null);
-    return response.ok && result?.code === 0 && typeof result.data?.message_id === 'string'
-      ? result.data.message_id : null;
+  send(chatId, text, ticket, signal) {
+    return this.#sendText('?receive_id_type=chat_id', text, ticket, signal, { receive_id: chatId });
   }
 
   async image(event, signal) {
