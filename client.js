@@ -49,23 +49,32 @@ window.__ModuleLoader__.load({
       cancelled: '已取消。' };
     const activeConnection = (job) => ['preparing', 'scan', 'verifying', 'saving'].includes(job?.state);
     const enabled = (value) => value ? '已启用' : '未启用';
+    // 字级规范（参照 macOS HIG 文本样式，面板基准 13px）：5 个字号、2 个字重。
+    //   title    20px/600  页面标题（h2），每页一个
+    //   lead     16px/600  总览的摘要句、品牌名；全面板最多一两处
+    //   headline 14px/600  区块标题（h3）、渠道名
+    //   body     13px/400  正文与控件；h4 和需要强调的正文用 600
+    //   caption  12px/400  元数据、状态、导航分组标签；低于 12px 不使用
+    // 新增文字只从这里取值，不写数字字号，也不使用 650/700 等其他字重。
+    const type = { title: 'var(--maomao-font-title)', lead: 'var(--maomao-font-lead)', headline: 'var(--maomao-font-headline)',
+      body: 'var(--maomao-font-body)', caption: 'var(--maomao-font-caption)' };
     const sectionStyle = {
       border: '1px solid var(--dsw-alias-border-default, rgba(127, 127, 127, 0.28))',
       borderRadius: 12, padding: '14px 16px', minWidth: 0,
     };
-    const inputStyle = { ...sectionStyle, padding: '5px 9px', fontSize: 13, maxWidth: '100%', background: 'transparent' };
+    const inputStyle = { ...sectionStyle, padding: '5px 9px', fontSize: type.body, maxWidth: '100%', background: 'transparent' };
     const lineStyle = { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' };
     // HIG: one prominent action per step, destructive actions look destructive.
     const variants = { primary: 'maomao-primary', destructive: 'maomao-destructive', confirmDestructive: 'maomao-destructive maomao-confirm' };
     const button = (label, onClick, disabled, variant) => h('button', { type: 'button', style: inputStyle, className: variants[variant], onClick, disabled }, label);
-    const unsavedStyle = { ...inputStyle, background: 'rgba(224, 154, 30, 0.22)', borderColor: '#b8791f', fontWeight: 650 };
+    const unsavedStyle = { ...inputStyle, background: 'rgba(224, 154, 30, 0.22)', borderColor: '#b8791f', fontWeight: 600 };
     const saveControl = (label, onClick, disabled, dirty, type = 'button') => h('div', { style: lineStyle },
       h('button', { type, style: inputStyle, className: dirty ? variants.primary : undefined, onClick, disabled }, label),
       h('span', { role: 'status', className: 'maomao-unsaved' }, dirty ? '未保存' : ''));
     const timestamp = (at) => new Date(at).toLocaleString('zh-CN');
 
     const stackStyle = { display: 'grid', gap: 14, minWidth: 0 };
-    const mutedStyle = { margin: 0, fontSize: 13, opacity: 0.72, lineHeight: 1.65 };
+    const mutedStyle = { margin: 0, fontSize: type.body, opacity: 0.72, lineHeight: 1.65 };
     const panelPages = {
       home: ['总览', '先让猫猫聊起来，再按需开启更多能力。'],
       channels: ['渠道与会话', '先连接 Bot，再授权聊天。主人身份和聊天权限分别管理。'],
@@ -98,9 +107,15 @@ window.__ModuleLoader__.load({
         h('div', { hidden: !open }, children));
     }
     const panelCss = `
-      .maomao-panel { container-type:inline-size; font-size:13px; line-height:1.55;
+      .maomao-panel { container-type:inline-size; font-size:var(--maomao-font-body); line-height:1.55;
+        --maomao-font-title:20px; --maomao-font-lead:16px; --maomao-font-headline:14px; --maomao-font-body:13px; --maomao-font-caption:12px;
         --maomao-accent:#7a62c9; --maomao-tint:rgba(139,115,210,.14); --maomao-danger:#c4372d; --maomao-warn:#b8791f; }
       /* Form controls follow the host theme instead of the browser default black text. */
+      .maomao-panel h2 { font-size:var(--maomao-font-title); font-weight:600; line-height:1.3; }
+      .maomao-panel h3 { font-size:var(--maomao-font-headline); font-weight:600; line-height:1.35; }
+      .maomao-panel h4 { font-size:var(--maomao-font-body); font-weight:600; }
+      .maomao-panel strong, .maomao-panel b, .maomao-panel th { font-weight:600; }
+      .maomao-panel .maomao-lead { font-size:var(--maomao-font-lead); font-weight:600; line-height:1.35; }
       .maomao-panel input, .maomao-panel select, .maomao-panel textarea { color:inherit; font:inherit; }
       .maomao-panel option { color:CanvasText; background-color:Canvas; }
       /* !important: these buttons also carry the shared inline control style. */
@@ -112,7 +127,7 @@ window.__ModuleLoader__.load({
       .maomao-panel .maomao-disclosure { border:0; background:transparent; padding:4px 0; text-align:left; font-weight:600; color:var(--maomao-accent); width:fit-content; }
       .maomao-panel *, .maomao-panel *::before, .maomao-panel *::after { box-sizing:border-box; }
       .maomao-panel [hidden] { display:none !important; }
-      .maomao-panel button { cursor:pointer; color:inherit; }
+      .maomao-panel button { cursor:pointer; color:inherit; font:inherit; }
       .maomao-panel button:disabled { cursor:default; opacity:.5; }
       .maomao-panel button:focus-visible, .maomao-panel input:focus-visible,
       .maomao-panel select:focus-visible, .maomao-panel textarea:focus-visible { outline:2px solid var(--maomao-accent); outline-offset:3px; }
@@ -121,20 +136,20 @@ window.__ModuleLoader__.load({
       .maomao-layout { display:grid; grid-template-columns:142px minmax(0,1fr); gap:24px; align-items:start; }
       .maomao-nav { display:grid; gap:18px; position:sticky; top:8px; }
       .maomao-nav-group { display:grid; gap:4px; }
-      .maomao-nav-label { font-size:12px; opacity:.72; padding:0 10px 3px; }
-      .maomao-nav button { border:0; background:transparent; border-radius:9px; text-align:left; padding:9px 10px; font-size:13px; }
-      .maomao-nav button.selected { background:var(--maomao-tint); font-weight:650; }
+      .maomao-nav-label { font-size:var(--maomao-font-caption); opacity:.72; padding:0 10px 3px; }
+      .maomao-nav button { border:0; background:transparent; border-radius:9px; text-align:left; padding:9px 10px; font-size:var(--maomao-font-body); }
+      .maomao-nav button.selected { background:var(--maomao-tint); font-weight:600; }
       .maomao-nav button:hover, .maomao-subnav button:hover { background:rgba(139,115,210,.09); }
       .maomao-subnav { display:flex; flex-wrap:wrap; gap:4px; border-bottom:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); padding-bottom:9px; }
-      .maomao-subnav button { font-size:13px; border:0; border-radius:7px; padding:6px 10px; background:transparent; }
-      .maomao-subnav button.selected { background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.12)); font-weight:650; }
-      .maomao-draft-dot { color:var(--maomao-warn); font-size:12px; }
+      .maomao-subnav button { font-size:var(--maomao-font-body); border:0; border-radius:7px; padding:6px 10px; background:transparent; }
+      .maomao-subnav button.selected { background:var(--dsw-alias-fill-secondary,rgba(127,127,127,.12)); font-weight:600; }
+      .maomao-draft-dot { color:var(--maomao-warn); font-size:var(--maomao-font-caption); }
       .maomao-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr)); gap:10px; }
       .maomao-channels { grid-template-columns:repeat(3,minmax(0,1fr)); }
       @container (max-width:420px) { .maomao-channels { grid-template-columns:minmax(0,1fr); } }
       .maomao-channel { border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); border-radius:12px; padding:13px; text-align:left; background:transparent; display:grid; gap:5px; }
       .maomao-channel.selected { border-color:var(--maomao-accent); background:rgba(139,115,210,.08); }
-      .maomao-status { display:inline-flex; gap:6px; align-items:center; font-size:12px; }
+      .maomao-status { display:inline-flex; gap:6px; align-items:center; font-size:var(--maomao-font-caption); }
       .maomao-status::before { content:''; width:6px; height:6px; border-radius:50%; background:#999; }
       .maomao-status.ready::before { background:#53a47c; }
       .maomao-status.waiting::before { background:#c18b38; }
@@ -229,8 +244,8 @@ window.__ModuleLoader__.load({
       }
       const needsSecret = mode === 'import' || platform === 'telegram';
       const consoleLink = brand === 'lark' ? 'https://open.larksuite.com/app' : 'https://open.feishu.cn/app';
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '连接 Bot'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '连接 Bot'),
         h('div', { style: lineStyle },
           platform === 'feishu' && h('select', { 'aria-label': '飞书版本', value: brand, style: inputStyle,
             disabled: busy, onChange: (event) => setBrand(event.target.value) },
@@ -358,8 +373,8 @@ window.__ModuleLoader__.load({
         } catch { setNotice('连接器未能处理请求，请刷新重试。'); }
         finally { setPending(false); }
       }
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, requestedRelink
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, requestedRelink
           ? `将 ${destinations[platform]} 私聊关联到同一主人` : pairingTitles[platform]),
         requestedRelink && h('p', { style: { margin: 0 } },
           '确认后，这个私聊将使用所选主人的普通记忆，并开启新的会话上下文。原记忆保留在原档案中。'),
@@ -449,8 +464,8 @@ window.__ModuleLoader__.load({
         } catch { setNotice('解绑失败，请重试。'); }
         finally { setSelected(null); setBusy(false); }
       }
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '管理已绑定会话'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '管理已绑定会话'),
         h('p', { style: { margin: 0 } }, `这里只显示 ${destinations[platform]} 的绑定。配对允许聊天，主人身份决定称呼与私聊记忆归属。`),
         entries.length === 0 && h('p', { style: { margin: 0 } }, '暂无面板绑定。'),
         ...entries.map((route) => h('div', { key: route.id, className: 'maomao-binding' },
@@ -459,7 +474,7 @@ window.__ModuleLoader__.load({
             : owners.find((owner) => owner.id === route.ownerId)?.label ?? `主人 ${route.owner}`}`,
           ` · ${(route.groupOpenId ?? route.userOpenId ?? route.id).slice(-8)}`),
           h('details', null, h('summary', { style: { cursor: 'pointer', opacity: 0.7 } }, '查看完整标识'),
-            h('code', { style: { overflowWrap: 'anywhere', display: 'block', fontSize: 12 } }, route.groupOpenId ? `群 OpenID：${route.groupOpenId}`
+            h('code', { style: { overflowWrap: 'anywhere', display: 'block', fontSize: type.caption } }, route.groupOpenId ? `群 OpenID：${route.groupOpenId}`
               : route.userOpenId ? `用户 OpenID：${route.userOpenId}` : `绑定 ID：${route.id}`)),
           h('div', { style: lineStyle }, selected === route.id
             ? h(ReactFragment, null, button('确认解绑', () => remove(route), busy, 'confirmDestructive'),
@@ -492,11 +507,11 @@ window.__ModuleLoader__.load({
         h('h3', { style: { margin: 0 } }, 'QQ 私聊'),
         h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.acceptStrangers,
           disabled: busy || !online, onChange: (event) => setDraft(event.target.checked === settings.acceptStrangers ? undefined : { acceptStrangers: event.target.checked }) }), '接受陌生人私聊'),
-        h('p', { style: { margin: 0, fontSize: 13 } }, value.acceptStrangers
+        h('p', { style: { margin: 0, fontSize: type.body } }, value.acceptStrangers
           ? '开启后，未配对用户也能直接聊天并调用已启用的聊天工具，会产生模型用量。每个人使用独立的 QQ 私聊记忆，不会获得主人身份。'
           : '关闭时，仅已配对或加入私聊白名单的用户可以聊天。未配对用户仍可发送 /sid 查询身份、/pair 查看配对步骤。'),
-        h('p', { style: { margin: 0, fontSize: 13 } }, '指定用户可通过「添加绑定 → QQ 私聊」配对。若这里仍开启，解绑后对方仍能作为陌生人聊天。'),
-        h('p', { role: 'status', style: { margin: 0, fontSize: 13 } }, inbound
+        h('p', { style: { margin: 0, fontSize: type.body } }, '指定用户可通过「添加绑定 → QQ 私聊」配对。若这里仍开启，解绑后对方仍能作为陌生人聊天。'),
+        h('p', { role: 'status', style: { margin: 0, fontSize: type.body } }, inbound
           ? `最近私聊收件：${inbound.outcome === 'admitted' ? '已准入' : '等待配对'} · ${timestamp(inbound.at)}`
           : '本次启动后尚未收到私聊消息。若 /sid 没有回复，请确认发给了当前 Bot，以及 QQ 平台已开放单聊消息能力。'),
         h('div', { style: lineStyle }, button('保存私聊设置', save, busy || !online || !draft),
@@ -604,8 +619,8 @@ window.__ModuleLoader__.load({
         } catch { setNotice('没能开始测试，请刷新重试。'); }
         finally { setBusy(false); }
       }
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '验证聊天回复'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '验证聊天回复'),
         h('div', { style: lineStyle },
           h('span', null, ready ? 'Bot 已在线' : '等待 Bot 在线'),
           h('span', null, target ? '· 已有绑定会话' : '· 等待绑定会话')),
@@ -638,9 +653,9 @@ window.__ModuleLoader__.load({
         const state = snapshot.channels[platform];
         return h('button', { key: platform, type: 'button', className: `maomao-channel${selected === platform ? ' selected' : ''}`,
           'aria-pressed': selected === platform, onClick: () => onSelect(platform) },
-          h('strong', { style: { fontSize: 14 } }, destinations[platform]),
+          h('strong', { style: { fontSize: type.headline, fontWeight: 600 } }, destinations[platform]),
           h('span', { className: `maomao-status ${state}` }, states[state]),
-          h('span', { style: { opacity: 0.72, fontSize: 12 } }, count ? `${count} 个已绑定会话` : '尚未绑定会话'));
+          h('span', { style: { opacity: 0.72, fontSize: type.caption } }, count ? `${count} 个已绑定会话` : '尚未绑定会话'));
       }));
     }
 
@@ -649,7 +664,7 @@ window.__ModuleLoader__.load({
       const bound = snapshot.bindings.managed.filter(route => route.scope !== 'owner').length;
       return h('div', { style: stackStyle },
         h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
-          h('h3', { style: { margin: 0, fontSize: 16 } }, connected ? `${connected} 个渠道在线 · ${bound} 个聊天已绑定` : '先选一个聊天入口'),
+          h('h3', { className: 'maomao-lead', style: { margin: 0 } }, connected ? `${connected} 个渠道在线 · ${bound} 个聊天已绑定` : '先选一个聊天入口'),
           h('p', { style: mutedStyle }, connected ? '日常调整从导航进入。新增平台时，只需完成连接、配对和回复验证。'
             : '只在 DSH 桌面聊天，无需绑定 Bot；想在聊天软件里使用，就先连接一个渠道。'),
           h('div', { style: lineStyle }, button('查看人设', () => go({ view: 'personas', personaTab: 'library' })),
@@ -657,11 +672,11 @@ window.__ModuleLoader__.load({
         h(ChannelCards, { snapshot, onSelect: openChannel }),
         h('div', { className: 'maomao-grid' },
           h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
-            h('h3', { style: { margin: 0, fontSize: 14 } }, '记忆'),
+            h('h3', { style: { margin: 0 } }, '记忆'),
             h('p', { style: mutedStyle }, `私聊记忆${snapshot.memory.private ? '已开启' : '未开启'} · QQ 记忆${snapshot.memory.qq ? '已开启' : '未开启'}`),
             button('看看猫猫记住了什么', () => go({ view: 'memory', memoryTab: 'library' }))),
           h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
-            h('h3', { style: { margin: 0, fontSize: 14 } }, '主动互动'),
+            h('h3', { style: { margin: 0 } }, '主动互动'),
             h('p', { style: mutedStyle }, `私聊主动分享：${modes[snapshot.sharing.mode]}`),
             button('调整接话与分享', () => go({ view: 'activity' })))),
         h('details', null, h('summary', { style: { cursor: 'pointer' } }, '第一次使用？查看接入顺序'),
@@ -679,7 +694,7 @@ window.__ModuleLoader__.load({
         catch { setState({ result: { reason: 'failed' } }); }
       }
       const result = state.result;
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: 13 } },
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: type.body } },
         h('div', { style: lineStyle }, button(state.pending ? '正在试跑…' : '主动分享试跑', preview, state.pending),
           h('span', null, '按当前规则选内容，试跑不发消息。')),
         result && h('div', { role: 'status', style: { display: 'grid', gap: 4, overflowWrap: 'anywhere' } },
@@ -729,8 +744,8 @@ window.__ModuleLoader__.load({
       const groups = Map.groupBy(catalog?.choices ?? [], (model) => model.provider);
       const savedChoice = catalog?.saved && !catalog.saved.inherit ? key(catalog.saved) : '';
       const choice = draftChoice ?? savedChoice;
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '对话模型 · 基础聊天'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '对话模型 · 基础聊天'),
         h('p', { style: { margin: 0 } }, '渠道文字聊天只需要一个可用的对话模型。默认跟随 DSH，也可以为猫猫单独选择。'),
         catalog && h('p', { style: { margin: 0 } }, catalog.saved && !catalog.saved.inherit
           ? `已保存：${catalog.saved.provider} / ${catalog.saved.model}`
@@ -817,8 +832,8 @@ window.__ModuleLoader__.load({
       const preview = result?.data && ['image/jpeg', 'image/png', 'image/webp', 'audio/wav'].includes(result.mime)
         ? `data:${result.mime};base64,${result.data}` : null;
       const title = mediaRoles[role];
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, title),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, title),
         h('p', { style: { margin: 0 } }, mediaUse[role]),
         h('div', { style: lineStyle },
           manual ? h(ReactFragment, null,
@@ -895,8 +910,8 @@ window.__ModuleLoader__.load({
       useEffect(refresh, [refresh]);
       if (!catalog) return h('p', { role: 'status' }, failed ? '模型配置读取失败。' : '正在读取媒体模型设置…');
       return h(ReactFragment, null,
-        selected === 'credentials' && h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-          h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '模型服务凭据'),
+        selected === 'credentials' && h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+          h('h3', { style: { margin: 0 } }, '模型服务凭据'),
           ...Object.keys(catalog.credentials).map((provider) => h(MediaCredential, { key: provider,
             provider, configured: catalog.credentials[provider], source: catalog.credentialSources?.[provider],
             writable: catalog.writable, invoke, refresh, drafts })),
@@ -966,8 +981,8 @@ window.__ModuleLoader__.load({
       const messages = { disabled: '在「模型与能力 → 向量检索」启用后可重建索引。', no_bindings: '当前没有已绑定的私聊。',
         failed: '重建中断，已写入的向量保留，可重试。', cancelled: '已取消，已写入的向量保留。',
         running: '正在重建…', done: '重建完成。', ready: '当前向量索引' };
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, '私聊向量索引'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '私聊向量索引'),
         h('p', { style: { margin: 0 } }, '重建会把当前已授权的普通记忆发给选定的 Embedding 服务，期间仍可使用本地检索。'),
         value && h('p', { role: 'status', style: { margin: 0 } }, messages[value.status],
           Number.isInteger(value.total) && ` · ${value.indexed}/${value.total}`),
@@ -1009,8 +1024,8 @@ window.__ModuleLoader__.load({
           }
         } catch { setState('save_failed'); }
       }
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 14, fontWeight: 600 } }, title),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, title),
         children(value, set, state === 'saving'),
         saveControl(`保存${title}`, save, !initial.available || state === 'saving' || !draft, draft !== undefined),
         state && h('p', { role: 'status', style: { margin: 0 } },
@@ -1219,8 +1234,8 @@ window.__ModuleLoader__.load({
 
       const change = (value) => setFilters((previous) => ({ ...previous, page: 0, ...value }));
       const selected = sources?.find(({ id }) => id === filters.sourceId);
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 15 } }, '猫猫记住了什么'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, '猫猫记住了什么'),
         h('p', { style: { margin: 0 } }, '按桌面会话、私聊主人或 QQ 群查看已保存的记忆。'),
         sourceError && h('p', { role: 'alert', style: { margin: 0 } }, '记忆范围读取失败，请刷新。'),
         !sourceError && !sources && h('p', { role: 'status', style: { margin: 0 } }, '正在读取记忆范围…'),
@@ -1307,8 +1322,8 @@ window.__ModuleLoader__.load({
       const target = data?.targets.find(({ id }) => id === targetId) ?? data?.targets[0];
       const currentPersona = data?.personas.find(({ id }) => id === (target?.personaId ?? data.defaultGroup));
       const options = (data?.personas ?? []).map(({ id, name }) => h('option', { key: id, value: id }, name));
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: 13 } },
-        h('h3', { style: { margin: 0, fontSize: 15 } }, section === 'library' ? '角色库' : '会话使用的人设'),
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: type.body } },
+        h('h3', { style: { margin: 0 } }, section === 'library' ? '角色库' : '会话使用的人设'),
         h('p', { style: { margin: 0 } }, '猫猫是内置人格。你可以添加角色设定，并为每个 QQ 群或已绑定的私聊单独选择。'),
         section === 'assignments' && data && h('label', { style: lineStyle }, '新 QQ 群默认人格',
           h('select', { style: inputStyle, value: data.defaultGroup, disabled: busy,
@@ -1349,9 +1364,9 @@ window.__ModuleLoader__.load({
 
     function StatusCard({ title, rows }) {
       return h('section', { style: sectionStyle },
-        h('h3', { style: { margin: '0 0 10px', fontSize: 14, fontWeight: 600 } }, title),
+        h('h3', { style: { margin: '0 0 10px' } }, title),
         h('dl', { style: { margin: 0, display: 'grid', gap: 8 } }, rows.map(([name, value]) =>
-          h('div', { key: name, style: { display: 'flex', justifyContent: 'space-between', gap: 16, fontSize: 13 } },
+          h('div', { key: name, style: { display: 'flex', justifyContent: 'space-between', gap: 16, fontSize: type.body } },
             h('dt', { style: { flexShrink: 0 } }, name),
             h('dd', { style: { margin: 0, textAlign: 'end', overflowWrap: 'anywhere' } }, value)))));
     }
@@ -1412,13 +1427,13 @@ window.__ModuleLoader__.load({
       }, [awaitingConnection, onChange]);
       const channelRoutes = snapshot?.bindings.managed.filter(route => route.platform === platform) ?? [];
       const last = snapshot?.sharing.last;
-      const pageHeader = h('div', null, h('h2', { style: { margin: '0 0 5px', fontSize: 19, fontWeight: 650 } }, panelPages[view][0]),
+      const pageHeader = h('div', null, h('h2', { style: { margin: '0 0 5px' } }, panelPages[view][0]),
         h('p', { style: mutedStyle }, panelPages[view][1]));
       return h('div', { className: 'maomao-panel', style: { display: 'grid', gap: 18, padding: '4px 0 20px', color: 'var(--dsw-alias-label-primary)' } },
         h('style', null, panelCss),
         h('header', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 } },
           h('div', { style: lineStyle }, h(CatIcon, { size: 26 }),
-            h('strong', { style: { fontSize: 16 } }, '猫猫'), h('span', { style: { opacity: 0.72, fontSize: 12 } }, '控制面板')),
+            h('strong', { className: 'maomao-lead' }, '猫猫'), h('span', { style: { opacity: 0.72, fontSize: type.caption } }, '控制面板')),
           button(state.pending ? '刷新中…' : '刷新状态', onChange, state.pending)),
         state.error && h('p', { role: 'alert', style: { margin: 0 } }, state.error),
         !snapshot && h('p', { role: 'status', style: { margin: 0 } }, '正在读取状态…'),
