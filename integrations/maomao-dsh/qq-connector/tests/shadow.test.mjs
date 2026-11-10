@@ -24,7 +24,7 @@ test('shadow keeps group context separate, judges followups, and writes no chat 
     const first = inbound('one', '最近上班好累啊');
     assert.equal((await shadow.observe(first)).decision, 'would_reply');
     assert.equal(seen[0].mode, 'unsolicited');
-    assert.equal((await shadow.observe(inbound('two', '继续说说'))).reason, 'cooldown');
+    assert.equal((await shadow.observe(inbound('two', '继续说说'))).reason, 'semantic_yes');
     assert.equal((await shadow.observe(inbound('three', '给@别人看', {
       mentions: [{ is_you: false, member_openid: 'member-b' }],
     }))).reason, 'addressed_other');
@@ -48,6 +48,30 @@ test('shadow keeps group context separate, judges followups, and writes no chat 
   }
 });
 
+test('activity is passed to the model instead of imposing multi-minute or hourly silence', async () => {
+  let now = 1_000_000;
+  const seen = [];
+  const shadow = new PassiveShadow(null, { clock: () => now, debounceMs: 1,
+    judge: async (payload) => { seen.push(payload); return { reply: true }; } });
+  try {
+    for (let i = 0; i < 7; i++) {
+      const envelope = inbound(`topic-${i}`, '新来的群友也想聊这个梗', { senderId: `member-${i}` });
+      assert.equal((await shadow.observe(envelope)).reason, 'semantic_yes');
+      shadow.noteReply(envelope, '接一句');
+      now += 5_000;
+    }
+    assert.equal(seen.length, 7);
+    assert.equal(seen.at(-1).mode, 'unsolicited');
+    assert.equal(seen.at(-1).recent_interjections, 6);
+    assert.equal(seen.at(-1).seconds_since_cat_reply, 5);
+    assert.equal((await shadow.observe(inbound('burst', '另一条', { senderId: 'someone' }))).decision, 'would_reply');
+    shadow.noteReply(inbound('burst'), '刚回过');
+    now += 3_990;
+    assert.equal((await shadow.observe(inbound('immediate', '又一条'))).reason, 'semantic_yes');
+    assert.equal(seen.at(-1).current.text, '又一条');
+  } finally { await shadow.stop(); }
+});
+
 test('newer message supersedes a pending judgment and candidate mode never sends', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'maomao-qq-shadow-'));
   let now = 1_000_000;
@@ -67,4 +91,29 @@ test('newer message supersedes a pending judgment and candidate mode never sends
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('a participant can be judged after sixty seconds until the actual QQ reply window expires', async () => {
+  let now = 1_000_000;
+  const judged = [];
+  const shadow = new PassiveShadow(null, { clock: () => now, debounceMs: 1,
+    judge: async (payload) => { judged.push(payload); return { reply: true }; } });
+  const anchor = inbound('human-anchor', '大家聊聊', { rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+  const peer = { maxRounds: 3 };
+  try {
+    await shadow.observe(anchor);
+    now += 75_000;
+    const turn = await shadow.notePeer('app-a', 'group-a', peer,
+      { messageId: 'late-participant', senderId: 'someone', content: '刚才那个梗我还有个看法' },
+      { enabled: () => true });
+    assert.ok(turn);
+    assert.deepEqual(judged[0].rounds, { used: 0, remaining: 3, limit: 3 });
+    assert.equal(turn.current(), true);
+    turn.release();
+    now = anchor.receivedAt + 300_001;
+    assert.equal(await shadow.notePeer('app-a', 'group-a', peer,
+      { messageId: 'expired', senderId: 'someone', content: '过期以后' }, { enabled: () => true }), null);
+    assert.equal(judged.length, 1);
+    assert.equal(turn.current(), false);
+  } finally { await shadow.stop(); }
 });

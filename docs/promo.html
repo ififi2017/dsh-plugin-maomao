@@ -8,19 +8,20 @@
 </script>
 <style>
   * { box-sizing: border-box; }
-  html { --width: 1600px; --copy-x: 119px; --copy-y: 108px; --title: 110px; --art-x: 878px; --art-y: 19px; --halo-x: 927px; }
-  html[data-format=og] { --width: 1280px; --copy-x: 94px; --copy-y: 115px; --title: 101px; --art-x: 660px; --art-y: 25px; --halo-x: 701px; }
+  html { --width: 1600px; --copy-x: 119px; --copy-y: 108px; --title: 110px; --halo-x: 927px; --halo-y: calc((640px - var(--halo-size)) / 2); --halo-size: 470px; }
+  html[data-format=og] { --width: 1280px; --copy-x: 94px; --copy-y: 115px; --title: 101px; --halo-x: 701px; }
   body { margin: 0; width: var(--width); height: 640px; overflow: hidden; font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", sans-serif; color: #302044; }
   main { width: 100%; height: 100%; position: relative; isolation: isolate; overflow: hidden; background: radial-gradient(ellipse at 77% 34%, #f6eaff 0, transparent 51%), linear-gradient(108deg, #fffaf1 8%, #f9f2ff 52%, #e2d3ff 100%); }
   main::before { content: ""; position: absolute; inset: 23px; border: 1.5px solid #6950932c; border-radius: 24px; }
-  .orbit { position: absolute; top: 72px; left: var(--halo-x); width: 470px; height: 470px; border: 1px dashed #9b78c073; border-radius: 50%; }
+  .orbit { position: absolute; top: var(--halo-y); left: var(--halo-x); width: var(--halo-size); height: var(--halo-size); border: 1px dashed #9b78c073; border-radius: 50%; }
   .orbit::before { content: ""; position: absolute; inset: 26px; border: 1px solid #fff; border-radius: 50%; background: radial-gradient(circle at 38% 34%, #fff9f1 0, #e8d5fa 78%); }
   .orbit::after { content: ""; position: absolute; left: 36px; bottom: 60px; height: 11px; width: 11px; border-radius: 50%; background: #b893e2; box-shadow: 396px -207px 0 1px #f8bdcf, 360px 10px 0 -1px #ba99de; }
   .dots { position: absolute; inset: 32px 32px 32px 55%; opacity: .5; background: radial-gradient(circle, #ae90cd 1.1px, transparent 1.4px) 0 0 / 17px 17px; mask-image: linear-gradient(110deg, transparent, #000 80%); }
-  .art { position: absolute; width: 465px; height: 601px; left: var(--art-x); top: var(--art-y); object-fit: contain; filter: drop-shadow(0 12px 10px #684a8422); }
+  /* At this size the visible silhouette is 20.5px right and 1px above the image center. */
+  .art { position: absolute; width: 465px; height: 601px; left: calc(var(--halo-x) + var(--halo-size) / 2 - 20.5px); top: calc(var(--halo-y) + var(--halo-size) / 2 + 1px); transform: translate(-50%, -50%); object-fit: contain; filter: drop-shadow(0 12px 10px #684a8422); }
   .spark { position: absolute; z-index: 1; color: #9464c0; font: 36px Georgia, serif; }
-  .spark.one { top: 140px; left: calc(var(--halo-x) + 5px); }
-  .spark.two { top: 384px; left: calc(var(--halo-x) + 432px); font-size: 45px; color: #aa72b8; }
+  .spark.one { top: calc(var(--halo-y) + 68px); left: calc(var(--halo-x) + 5px); }
+  .spark.two { top: calc(var(--halo-y) + 312px); left: calc(var(--halo-x) + 432px); font-size: 45px; color: #aa72b8; }
   .copy { position: absolute; z-index: 2; left: var(--copy-x); top: var(--copy-y); }
   .eyebrow { display: flex; align-items: center; gap: 13px; color: #614285; font: 750 17px/1.25 ui-monospace, Menlo, monospace; letter-spacing: .18em; }
   .eyebrow span { display: inline-block; width: 27px; height: 3px; border-radius: 9px; background: #a67bd3; }

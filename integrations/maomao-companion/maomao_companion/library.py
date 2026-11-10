@@ -138,7 +138,7 @@ class MemeStore:
         confidence = result.get("confidence")
         if not isinstance(description, str) or not 1 <= len(description) <= 200 or not isinstance(ocr, str) or len(ocr) > 100 or category not in CATEGORIES:
             return None
-        eligible = result.get("is_meme") is True and type(confidence) in (int, float) and (.80 if explicit else .85) <= confidence <= 1
+        eligible = result.get("is_meme") is True and type(confidence) in (int, float) and (0 if explicit else .85) <= confidence <= 1
         old = self.known(digest)
         seen = (old["seen"] if old else 0)+int(count_sighting)
         observed = old["last_seen"] if old and not count_sighting else time.time()

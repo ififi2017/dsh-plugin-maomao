@@ -21,6 +21,7 @@ def _companion_path() -> Path:
 sys.path.insert(0, str(_companion_path()))
 from maomao_companion.dialogue import DialogueStore  # noqa: E402
 from maomao_companion.library import MemeStore, collection_reply, image_input  # noqa: E402
+from maomao_companion.sticker_tools import sticker_tool
 from maomao_companion.embeddings import OpenRouterEmbeddings, embedding_client  # noqa: E402
 from maomao_companion.budget import BudgetedEmbeddings, OutboundBudget  # noqa: E402
 
@@ -84,7 +85,7 @@ class OrdinaryService:
             self.stores[path] = (DialogueStore(path / "dialogue.sqlite3"), MemeStore(path / "gallery", scope))
         return self.stores[path]
 
-    def observe(self, envelope: dict) -> dict:
+    def observe(self, envelope: dict, options=None) -> dict:
         kind, scope, sender, message_id, path = self._scope(envelope)
         text = envelope.get("text", "")
         if not isinstance(text, str):
@@ -102,7 +103,7 @@ class OrdinaryService:
         received = envelope.get("receivedAt")
         received = received / 1000 if isinstance(received, (int, float)) and 0 < received <= time.time() * 1000 + 300_000 else time.time()
         if body:
-            store.begin(scope, turn_id, query, received)
+            store.begin(scope, turn_id, query, received, extract=not (options or {}).get("learningManaged"))
         if body or has_image:
             gallery.observe_message(turn_id, sender, body or "[图片]")
         context = store.context(scope, query) if body else {}
@@ -137,6 +138,12 @@ class OrdinaryService:
             config = args["embeddingOverride"]
             model = embedding_client(config["model"], key_provider=lambda _: config["key"]) if config else None
         embedder = BudgetedEmbeddings(model, self.embedding_budget, scope) if model else None
+        if op == 'sticker_tool':
+            if args.get('action') in ('inspect', 'collect') and not any(item.get('kind') == 'image' for item in envelope['attachments']):
+                raise ValueError('image_receipt_required')
+            packs = {code: {'path': str(self._pack_file(code)), 'category': category, 'description': description}
+                     for code, (category, description) in PACK.items() if self._pack_file(code)}
+            return sticker_tool(gallery, args['action'], args, embedder, packs)
         if op in ("image_preview", "prepare_image", "remember_image"):
             if not any(item.get("kind") == "image" for item in envelope["attachments"]):
                 raise ValueError("image_receipt_required")
@@ -228,7 +235,7 @@ def main() -> None:
                 raise ValueError("invalid_request")
             op = request.get("op")
             envelope = request.get("envelope")
-            result = service.observe(envelope) if op == "observe" else service.media(op, envelope, request.get("args", {}))
+            result = service.observe(envelope, request.get("args", {})) if op == "observe" else service.media(op, envelope, request.get("args", {}))
             response = {"id": request_id, "ok": True, "result": result}
         except Exception as error:
             response = {"id": request.get("id") if isinstance(request, dict) else None,

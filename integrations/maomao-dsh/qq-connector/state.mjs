@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 
 const DAY = 86_400_000;
 const GROUP_REPLIES = 5;
-const GROUP_REPLY_MS = 300_000;
+export const GROUP_REPLY_MS = 300_000;
 const EMPTY = () => ({ version: 1, sessions: {}, receipts: {}, sends: {} });
 const sendCount = (state, receiptKey) => Object.keys(state.sends).filter((key) => key.startsWith(`${receiptKey}:`)).length;
 

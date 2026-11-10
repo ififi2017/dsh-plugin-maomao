@@ -14,6 +14,51 @@ function bind(options = {}) {
 }
 const imageArgs = { prompt: 'test image', aspect_ratio: '1:1', use_reference: false };
 
+test('project reference is inspected, passed byte-for-byte to generation, and never shared across turns', async () => {
+  const supplied = { data: Buffer.from('image bytes').toString('base64'), mediaType: 'image/png', bytes: 11, url: 'https://example.com/cat.png' };
+  let received;
+  const t = bind({ image: async (_args, _signal, ref) => { received = ref; return 'sent'; },
+    resourceImage: async () => supplied });
+  const exec = { agent: { id: 'test-session', options: { provider: 'google', model: 'vision' }, ctx: { get(name) {
+    return name === 'llm' ? { resolveModelInfo: async () => ({ inputModalities: ['image'] }) }
+      : name === 'attachments' ? { saveImage: async ({ data }) => {
+        assert.equal(data.toString(), 'image bytes'); return { attachmentId: 'reference-art' };
+      } } : undefined;
+  } } } };
+  const found = await t.run('maomao_reference_image', { url: supplied.url }, exec);
+  assert.equal(found.status, 'ok'); assert.equal(JSON.parse(found.data).visual_input, true);
+  assert.equal(found.image.attachmentId, 'reference-art');
+  const { reference_id } = JSON.parse(found.data);
+  const other = bind({ image: async () => assert.fail('foreign reference used') });
+  assert.equal((await other.run('maomao_generate_image', { ...imageArgs, reference_id })).status, 'denied');
+  assert.equal((await t.run('maomao_generate_image', { ...imageArgs, reference_id })).status, 'sent');
+  assert.equal(received.data, supplied.data); assert.equal(received.url, supplied.url);
+  assert.equal(t.turn.learningOutcomes()[0].reference_source, supplied.url);
+  const oldTool = t.defs.get('maomao_generate_image');
+  await t.close();
+  assert.equal((await oldTool.execute({ ...imageArgs, reference_id }, t.exec)).status, 'denied');
+  await other.close();
+});
+
+test('project evidence comes only from a completed read and reference failures do not consume generation', async () => {
+  let evidence = 0, calls = 0, current = true;
+  const t = bind({ current: () => current, image: async () => { calls++; return 'sent'; },
+    learnProject: data => { evidence++; assert.equal(data.sha, 'a'.repeat(40)); return { source: 'project-source' }; },
+    resourceProject: async () => ({ kind: 'text', content: 'white cat ears', url: 'https://example.com/design.md', sha: 'a'.repeat(40) }),
+    resourceImage: async () => { throw Object.assign(Error('credential details'), { code: 'RESOURCE_INACCESSIBLE' }); },
+  });
+  const found = await t.run('maomao_project_read', { repository: 'https://github.com/example/art' });
+  assert.equal(JSON.parse(found.data).learning_source.source, 'project-source'); assert.equal(evidence, 1);
+  const missing = await t.run('maomao_reference_image', { url: 'https://example.com/private.png' });
+  assert.equal(missing.status, 'unavailable'); assert.doesNotMatch(missing.data, /credential details/);
+  assert.equal((await t.run('maomao_generate_image', { ...imageArgs, reference_id: 'invented' })).status, 'denied');
+  assert.equal(calls, 0);
+  assert.equal((await t.run('maomao_generate_image', imageArgs)).status, 'sent');
+  current = false;
+  assert.equal((await t.run('maomao_project_read', { repository: 'https://github.com/example/art' })).status, 'denied');
+  assert.equal(evidence, 1); await t.close();
+});
+
 test('media tools are leased to one turn, validate references and share a concurrent send budget', async () => {
   const actions = [];
   const t = bind({ image: async () => { actions.push('image'); return 'sent'; }, voice: async () => { actions.push('voice'); return 'sent'; } });
@@ -145,4 +190,22 @@ test('screenshot returns a DSH image attachment only to an image-capable calling
   assert.equal(value.status, 'ok'); assert.deepEqual(value.image, ref);
   assert.deepEqual(t.defs.get('maomao_browser_screenshot').output.render({}, value)[1], { type: 'image', attachment: ref });
   await t.close();
+});
+
+test('malformed arguments come back as invalid with a fix, while blocked targets stay denied with a reason', async () => {
+  const t = bind({ image: async () => 'sent', web: { search: async () => ({ sources: [] }), fetch: async () => ({}) } });
+  const reason = (value) => JSON.parse(value.data).reason;
+  const empty = await t.run('maomao_web_search', { query: '' });
+  assert.equal(empty.status, 'invalid'); assert.match(reason(empty), /query/);
+  const ratio = await t.run('maomao_generate_image', { ...imageArgs, aspect_ratio: '4:3' });
+  assert.equal(ratio.status, 'invalid'); assert.match(reason(ratio), /1:1/);
+  const issue = await t.run('maomao_project_read', { repository: 'https://github.com/o/r/issues/3' });
+  assert.equal(issue.status, 'invalid'); assert.match(reason(issue), /tree\/blob/);
+  const local = await t.run('maomao_web_fetch', { url: 'http://127.0.0.1' });
+  assert.equal(local.status, 'denied'); assert.match(reason(local), /公开/);
+  const reference = await t.run('maomao_generate_image', { ...imageArgs, reference_id: 'invented' });
+  assert.equal(reference.status, 'denied'); assert.match(reason(reference), /maomao_reference_image/);
+  // None of these consumed the single media send for the turn.
+  assert.equal((await t.run('maomao_generate_image', imageArgs)).status, 'sent');
+  t.close();
 });

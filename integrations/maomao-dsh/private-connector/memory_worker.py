@@ -15,6 +15,8 @@ from maomao_companion.dialogue import DialogueStore, PREFERENCE, PRIVATE_FACT
 from maomao_companion.embeddings import SemanticMemory, embedding_client
 from maomao_companion.contact import ContactLedger, Policy
 from maomao_companion.life import public_url
+from maomao_companion.library import MemeStore
+from maomao_companion.sticker_tools import sticker_tool
 from feed_activity import candidate, mark_shared
 
 
@@ -104,6 +106,11 @@ def run(payload):
         raise ValueError("invalid_activity_operation")
     key = os.environ.get("MAOMAO_PRIVATE_EMBEDDING_KEY")
     model = os.environ.get("MAOMAO_PRIVATE_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b")
+    if payload['op'] == 'sticker_tool':
+        client = embedding_client(model, key_provider=lambda _: key) if key else None
+        embedder = BudgetedEmbeddings(client, OutboundBudget(root / scope / 'embedding-budget.sqlite3', limit=200), scope) if client else None
+        gallery = MemeStore(root / scope / 'gallery', scope)
+        return sticker_tool(gallery, payload['details']['action'], payload['details'], embedder)
     if payload["op"] in ("index_status", "index_rebuild"):
         path = root / scope / "dialogue.sqlite3"
         if not path.is_file():
@@ -136,7 +143,7 @@ def run(payload):
     store = DialogueStore(owner / "dialogue.sqlite3")
     if op == "desktop":
         # Do not add other desktop messages or assistant responses to durable chat memory.
-        if PREFERENCE.fullmatch(body):
+        if PREFERENCE.fullmatch(body) and not (payload.get("details") or {}).get("learningManaged"):
             store.begin(scope, turn_id, body, time.time())
         context = store.context(scope, body)
         result = {key: context[key] for key in ("user_preferences", "active_projects")}
@@ -145,7 +152,7 @@ def run(payload):
             result["hermes_history"] = [{"statement": note} for note in notes]
         return result
     if op == "begin":
-        turn = store.begin(scope, turn_id, body, time.time())
+        turn = store.begin(scope, turn_id, body, time.time(), extract=not (payload.get("details") or {}).get("learningManaged"))
         context = store.context(scope, body)
         # Cross-channel context contains durable ordinary facts, not recent turns or mood.
         result = {key: context[key] for key in ("user_preferences", "active_projects")}
@@ -180,9 +187,12 @@ def run(payload):
 
 if __name__ == "__main__":
     try:
-        line = sys.stdin.readline(24_001)
-        if len(line) > 24_000:
+        line = sys.stdin.readline(6_750_001)
+        if len(line) > 6_750_000:
             raise ValueError("ordinary_request_too_large")
-        print(json.dumps(run(json.loads(line)), ensure_ascii=False))
+        payload = json.loads(line)
+        if payload.get('op') != 'sticker_tool' and len(line) > 24_000:
+            raise ValueError('ordinary_request_too_large')
+        print(json.dumps(run(payload), ensure_ascii=False))
     except Exception:
         sys.exit(1)

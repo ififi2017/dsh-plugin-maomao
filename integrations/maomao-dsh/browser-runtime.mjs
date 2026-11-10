@@ -83,11 +83,14 @@ export class PublicBrowser {
       if (!page || !browserUrl(page.url())) throw browserError('BROWSER_PAGE_MISSING');
       const data = await page.evaluate(() => ({ title: document.title.slice(0, 180),
         text: (document.body?.innerText ?? '').slice(0, 12_000),
+        images: Array.from(document.querySelectorAll('img')).filter(img => img.getClientRects().length && img.naturalWidth > 80 && img.naturalHeight > 80)
+          .slice(0, 30).map(img => ({ url: img.currentSrc || img.src, label: img.alt.slice(0, 180) })),
         links: Array.from(document.querySelectorAll('a[href]')).filter(a => a.getClientRects().length && a.innerText.trim())
           .slice(0, 80).map(a => ({ url: a.href, text: a.innerText.trim().slice(0, 120) })) }));
       snapshotId = randomUUID();
       links = data.links.filter(l => browserUrl(l.url)).slice(0, 30).map((l, i) => ({ ...l, id: i + 1 }));
-      return { url: page.url(), title: data.title, content: data.text, truncated: data.text.length >= 12_000, snapshot: snapshotId, links };
+      return { url: page.url(), title: data.title, content: data.text, truncated: data.text.length >= 12_000, snapshot: snapshotId, links,
+        images: (data.images ?? []).filter(img => browserUrl(img.url)).slice(0, 30) };
     };
     return { close, async run(action, args, signal) {
       if (released) throw browserError('BROWSER_DISABLED');
