@@ -106,7 +106,8 @@ export class LearningStore {
       const row = db.prepare('SELECT * FROM entries WHERE id=?').get(id);
       if (!row) return { status: 'missing' };
       if (!owner && row.subject !== subject) return { status: 'denied' };
-      if (row.version !== version) return { status: 'conflict' };
+      // Hand back the current version so the model can retry in one step instead of loading first.
+      if (row.version !== version) return { status: 'conflict', id: row.id, version: row.version };
       let next = row;
       if (action === 'restore') {
         if (!owner || !Number.isSafeInteger(revision)) return { status: 'denied' };

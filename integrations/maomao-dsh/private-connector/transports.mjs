@@ -62,6 +62,8 @@ export class TelegramTransport {
   #fetch;
   #ready = false;
   username = '';
+  // What the panel can say about group chats: privacy mode, and the last group message seen.
+  groupCheck = { readAll: null, last: null };
 
   constructor({ token, botId, fetchImpl = fetch }) {
     if (!botId || telegramBotId(token) !== botId) {
@@ -83,6 +85,8 @@ export class TelegramTransport {
   async run(receive, signal, choose) {
     const me = await identifyTelegramBot(this.#call.bind(this), this.#botId, signal);
     this.username = typeof me.username === 'string' ? me.username.toLowerCase() : '';
+    // With privacy mode on, Telegram never delivers plain @mentions in groups.
+    this.groupCheck.readAll = me.can_read_all_group_messages === true;
     let offset;
     let retry = 1000;
     let conflictUntil;
@@ -113,12 +117,24 @@ export class TelegramTransport {
           if (signal.aborted) break;
           if (!Number.isSafeInteger(update?.update_id) || update.update_id < 0) continue;
           const event = telegramInbound(this.#botId, update, Date.now(), this.username);
+          if (['group', 'supergroup'].includes(update.message?.chat?.type)) {
+            this.groupCheck.last = { reason: event ? 'addressed' : 'not_addressed', at: Date.now() };
+          }
           if (event) await receive(event);
           if (choose && update.callback_query) await this.#callback(update.callback_query, choose, signal);
           offset = Math.max(offset ?? 0, update.update_id + 1);
         }
       }
     } finally { this.#ready = false; }
+  }
+
+  // "typing…" while the cat works on a reply. Telegram shows it for about 5 s, so refresh every 4 s.
+  typing(event, signal) {
+    const tick = () => this.#call('sendChatAction', { chat_id: event.chatId, action: 'typing' }, signal, 5000).catch(() => undefined);
+    void tick();
+    const timer = setInterval(tick, 4000);
+    timer.unref?.();
+    return () => clearInterval(timer);
   }
 
   async reply(event, text, _ticket, signal) {
@@ -202,6 +218,7 @@ export class FeishuTransport {
   #sdk;
   #brand;
   #botOpenId = '';
+  groupCheck = { identified: null, last: null };
 
   constructor({ appId, secret, brand = 'feishu', fetchImpl = fetch, sdk }) {
     if (!/^cli_[\w-]+$/.test(appId ?? '') || !secret) throw safeError('feishu_credentials_invalid');
@@ -222,6 +239,7 @@ export class FeishuTransport {
     if (signal.aborted) return;
     // Needed to tell an @mention of this bot apart from other mentions in group chats.
     this.#botOpenId = await this.#ownOpenId(signal).catch(() => '');
+    this.groupCheck.identified = Boolean(this.#botOpenId);
     const socket = new sdk.WSClient({ appId: this.#appId, appSecret: this.#secret,
       domain: this.#brand === 'lark' ? sdk.Domain.Lark : sdk.Domain.Feishu,
       logger: quietLogger, autoReconnect: true, handshakeTimeoutMs: 12_000 });
@@ -229,6 +247,9 @@ export class FeishuTransport {
     const dispatcher = new sdk.EventDispatcher({ logger: quietLogger }).register({
       'im.message.receive_v1': async (payload) => {
         const event = feishuInbound(this.#appId, payload, Date.now(), this.#botOpenId);
+        if (payload?.message?.chat_type === 'group') {
+          this.groupCheck.last = { reason: event ? 'addressed' : !this.#botOpenId ? 'bot_unidentified' : 'not_addressed', at: Date.now() };
+        }
         if (event && !signal.aborted) await receive(event);
       },
       ...(choose ? { 'card.action.trigger': (payload) => {
@@ -272,6 +293,21 @@ export class FeishuTransport {
       return this.#token.value;
     })().finally(() => { this.#refresh = null; });
     return this.#refresh;
+  }
+
+  // Lark has no typing API; like Hermes Agent, mark the message with a "Typing" reaction and remove it afterwards.
+  typing(event, signal) {
+    const added = this.#request(`/${event.messageId}/reactions`, { reaction_type: { emoji_type: 'Typing' } }, signal)
+      .then((response) => response.json()).then((result) => result?.code === 0 ? result.data?.reaction_id ?? null : null)
+      .catch(() => null);
+    return () => {
+      void added.then(async (reactionId) => {
+        if (!reactionId) return;
+        const token = await this.#accessToken(AbortSignal.timeout(8000));
+        await this.#fetch(`${LARK_ORIGINS[this.#brand]}/open-apis/im/v1/messages/${event.messageId}/reactions/${reactionId}`, {
+          method: 'DELETE', redirect: 'error', signal: AbortSignal.timeout(8000), headers: { ...jsonHeaders, authorization: `Bearer ${token}` } });
+      }).catch(() => undefined);
+    };
   }
 
   async #ownOpenId(signal) {

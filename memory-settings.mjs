@@ -24,6 +24,8 @@ export async function manageMemorySettings(ctx, request, signal) {
         lonely: share?.schedule?.lonely !== false,
         quietStart: share?.quietHours?.start ?? 23,
         quietEnd: share?.quietHours?.end ?? 8,
+        // Saving "send" requires the confirmation, so a saved send mode is a confirmed one.
+        sendConfirmed: share?.enabled === true && share.schedule?.mode === 'send',
       },
     };
   }

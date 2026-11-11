@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { finalAssistantText, sessionIsStale } from './harness.mjs';
+import { log } from '../debug-log.mjs';
 
 // The judge starts over often: a long run of its own "reply":true answers makes it keep saying yes.
 const JUDGE_TURNS = 8;
@@ -93,7 +94,12 @@ rounds.used 是已经续聊的次数，remaining 是本次仍可使用的次数�
         if (result.reason === 'timeout') continue;
         if (result.reason === 'input-required') throw new Error('shadow_judge_input_required');
         await this.#state.noteSessionTurn?.(envelope.botId, 'shadow-group', envelope.chatId, sessionId)?.catch?.(() => undefined);
-        return parseJudgment(finalAssistantText(result.output?.records), key);
+        const raw = finalAssistantText(result.output?.records);
+        try {
+          const verdict = parseJudgment(raw, key);
+          log('debug', 'judge', `${payload.mode ?? 'reply'} → ${JSON.stringify(verdict)}`, { rounds: payload.rounds, several_people: payload.several_people });
+          return verdict;
+        } catch (error) { log('warn', 'judge', '判断结果无法解析', raw.slice(0, 300)); throw error; }
       }
     }).finally(() => {
       if (this.#queues.get(key) === queued) this.#queues.delete(key);

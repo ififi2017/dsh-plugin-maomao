@@ -24,6 +24,7 @@ async function setup(t, send) {
   const sends = [];
   const acks = [];
   const memory = [];
+  const sections = [];
   const listeners = new Map();
   let stop;
   let sessionCount = 0;
@@ -39,7 +40,7 @@ async function setup(t, send) {
     async projections() { return { values: { agentPreset: 'maomao-qq-ordinary' } }; },
     async resolveAgent() {
       return { agent: { ctx: { get: () => ({ getSectionOrder() {}, section({ text }) {
-        assert.match(text, /按本轮语境/);
+        sections.push(text);
         return () => {};
       } }) } } };
     },
@@ -58,11 +59,11 @@ async function setup(t, send) {
     ordinary: { async observe(event) { memory.push(event.text); }, async stop() {} } });
   t.after(async () => { await connector.stop(); await rm(root, { recursive: true, force: true }); });
   await connector.start();
-  return { connector, sends, acks, prompts, memory, click: (event) => listeners.get('interaction')({}, event) };
+  return { connector, sends, acks, prompts, memory, sections, click: (event) => listeners.get('interaction')({}, event) };
 }
 
 test('QQ addressed turns send model-generated native buttons and continue once on the authorized click', async (t) => {
-  const { connector, sends, acks, prompts, memory, click } = await setup(t);
+  const { connector, sends, acks, prompts, memory, sections, click } = await setup(t);
   assert.equal(await connector.accept(user), true);
   await until(() => sends.length === 1);
   const [card] = sends;
@@ -87,10 +88,12 @@ test('QQ addressed turns send model-generated native buttons and continue once o
   assert.equal(sends[1].content, '那就去温室看看。');
   assert.equal(prompts[0].sessionId, prompts[1].sessionId);
   assert.match(prompts[1].content[0].text, /已选择的聊天分支.*去雨后的温室/);
+  assert.match(sections[0], /聊天选项/);
+  assert.doesNotMatch(sections.at(-1), /聊天选项/, 'right after a card the option guidance is not offered again');
   assert.deepEqual(memory, [user.content]);
 });
 
-test('QQ preserves text and choices after a definite native Markdown rejection', async (t) => {
+test('QQ keeps the text after a definite native Markdown rejection, without a numbered option list in groups', async (t) => {
   const { connector, sends } = await setup(t, (message) => {
     if (message.keyboard) throw new ApiError('Markdown rejected', 400, '/v2/groups/test/messages', 40034012);
     return { id: 'fallback' };
@@ -98,7 +101,8 @@ test('QQ preserves text and choices after a definite native Markdown rejection',
   await connector.accept(user);
   await until(() => sends.length === 2);
   assert.equal(sends[1].msgType, MsgType.TEXT);
-  assert.match(sends[1].content, /1\. 钻进竹林\n2\. 去雨后的温室/);
+  assert.match(sends[1].content, /\S/);
+  assert.doesNotMatch(sends[1].content, /1\. 钻进竹林/, 'people in a group answered "4" to a plain-text list');
   assert.deepEqual(sends[0].extra, sends[1].extra);
 });
 

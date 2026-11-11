@@ -3,12 +3,12 @@ import { ChannelSetup } from './channel-setup.mjs';
 import { manageChatModel } from './model-config.mjs';
 import { manageMediaModel } from './model-media.mjs';
 import { manageMemorySettings } from './memory-settings.mjs';
-import { readMemoryView } from './memory-view.mjs';
 import { manageStickers } from './integrations/maomao-dsh/sticker-library.mjs';
 import { LearningRuntime } from './integrations/maomao-dsh/learning.mjs';
 import { PublicBrowser } from './integrations/maomao-dsh/browser-runtime.mjs';
 import { manageWeb } from './web-settings.mjs';
 import { ChannelPersonas } from './integrations/maomao-dsh/personas.mjs';
+import { DebugLog, LEVELS, installLog } from './integrations/maomao-dsh/debug-log.mjs';
 
 const channelStates = new Set(['ready', 'waiting', 'off']);
 const sharedMemoryStates = new Set(['off', 'active', 'waiting_channels', 'waiting_owner']);
@@ -77,6 +77,9 @@ class MaomaoPanel extends TypertRemoteService {
         telegram: diagnostics(privateStatus?.diagnostics?.telegram),
         qq: diagnostics(qq?.diagnostics),
       },
+      // The last time QQ refused a Markdown or button message, so the panel can show the code.
+      formats: { qq: Number.isFinite(qq?.diagnostics?.format?.at) ? { at: qq.diagnostics.format.at,
+        code: Number.isSafeInteger(qq.diagnostics.format.code) ? qq.diagnostics.format.code : null, keyboard: qq.diagnostics.format.keyboard === true } : null },
       memory: {
         private: privateStatus?.memory === true,
         shared: privateStatus?.sharedMemory === true,
@@ -138,14 +141,25 @@ class MaomaoPanel extends TypertRemoteService {
     return manageMemorySettings(this.ctx, request, signal);
   }
 
-  memoryView(request) {
-    requireOwner(this.ctx);
-    return readMemoryView(this.ctx, request);
-  }
-
   privateGroups(request) {
     requireOwner(this.ctx);
     return this.ctx.get('maomaoPrivate')?.groups?.(request) ?? { status: 'ok', enabled: false, groups: [] };
+  }
+
+  // 诊断 → API 报错 / 终端. Owner-only, local data.
+  diagnosticLogs(request) {
+    requireOwner(this.ctx);
+    const debug = this.ctx.get('maomaoLog');
+    if (!debug) return { status: 'unavailable' };
+    const { action, after = 0, level = 'trace', source = '', query = '' } = request ?? {};
+    if (action === 'read') {
+      if (!Number.isSafeInteger(after) || !LEVELS.includes(level) || typeof source !== 'string' || typeof query !== 'string' || query.length > 100) return { status: 'invalid' };
+      return { status: 'ok', level: debug.level, startedAt: debug.startedAt, sources: debug.sources(), rows: debug.read({ after, level, source, query }) };
+    }
+    if (action === 'api') return { status: 'ok', rows: debug.apiErrors({ source: typeof source === 'string' ? source : '' }) };
+    if (action === 'level') return { status: debug.setLevel(request.level) ? 'saved' : 'invalid', level: debug.level };
+    if (action === 'clear_api') { debug.clearApiErrors(); return { status: 'saved' }; }
+    return { status: 'invalid' };
   }
 
   stickers(request) {
@@ -222,11 +236,16 @@ class MaomaoPanel extends TypertRemoteService {
 }
 
 // Register the JavaScript method with Typert's source-mode discovery.
-for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'privateGroups', 'stickers', 'learning', 'personas', 'webSettings']) {
+for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'privateGroups', 'stickers', 'diagnosticLogs', 'learning', 'personas', 'webSettings']) {
   Remote(MaomaoPanel.prototype[name], { name, addInitializer: (fn) => initializers.push(fn) });
 }
 
 export function apply(ctx, config = {}) {
+  // Diagnostics log first, so every service started below can write to it.
+  const debug = installLog(new DebugLog());
+  ctx.provide('maomaoLog', debug);
+  ctx.effect(() => () => debug.close());
+  debug.write('info', 'plugin', '猫猫插件启动', { level: debug.level });
   const learning = new LearningRuntime(ctx);
   ctx.provide('maomaoLearning', learning);
   ctx.effect(() => () => learning.close());

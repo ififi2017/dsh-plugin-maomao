@@ -84,7 +84,9 @@ export function scoreReplies(pairs, { minSample = 8 } = {}) {
 
 // A one-line reminder built from the cat's own last few replies. A persona rule cannot win
 // against a transcript full of "…喵！"; a reminder about this very reply usually does.
-const STAGE_DIRECTION = /[（(][^()（）\n]{2,20}[)）]/u;
+// A stage direction is narration in brackets, e.g. （甩了甩尾巴）; 颜文字 like (ฅ´ω`ฅ) have no Chinese words in them.
+const STAGE_DIRECTION = /[（(][^()（）\n]*\p{Script=Han}{2}[^()（）\n]*[)）]/u;
+const EMOJI_END = /\p{Extended_Pictographic}\uFE0F?[\s！!～~。…]*$/u;
 export function styleNudge(replies, { window = 6 } = {}) {
   const recent = replies.map(plain).filter(Boolean).slice(-window);
   if (recent.length < 3) return '';
@@ -92,7 +94,9 @@ export function styleNudge(replies, { window = 6 } = {}) {
   const count = (test) => recent.filter(test).length;
   if (count((r) => /喵[！!～~。…]*$/.test(r)) >= Math.min(4, recent.length)) tips.push('最近几句都用「喵」收尾了，这句别带「喵」');
   if (count((r) => /[！!][喵～~]*$/.test(r)) >= Math.min(4, recent.length)) tips.push('最近几句都是感叹号，这句语气放平一点');
+  if (count((r) => EMOJI_END.test(r)) >= Math.min(4, recent.length)) tips.push('最近几句都用 emoji 收尾，这句别加');
   if (count((r) => STAGE_DIRECTION.test(r)) >= 2) tips.push('别写括号里的动作描写，直接说话');
+  if (count((r) => KAOMOJI.test(r.replace(STAGE_DIRECTION, ''))) >= 3) tips.push('最近颜文字用得多，这句别用');
   const openers = recent.map((r) => Array.from(r).slice(0, 2).join(''));
   if (openers.length >= 3 && openers.slice(-3).every((o) => o === openers.at(-1))) tips.push(`别再用「${openers.at(-1)}」开头`);
   return tips.length ? `[说话节奏提醒，只针对这一句：${tips.join('；')}。]` : '';

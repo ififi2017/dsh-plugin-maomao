@@ -1,3 +1,5 @@
+import { chatSeesImages, chatSelection, dshVision } from './integrations/maomao-dsh/model-call.mjs';
+import { chatModels } from './model-config.mjs';
 const catalog = {
   vision: ['gemini-3.8-flash', 'gemini-3.8-flash-lite', 'gpt-4.1-mini'],
   image: ['gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image', 'gemini-3-pro-image',
@@ -25,8 +27,13 @@ const mime = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
 const httpOutcome = (code) => [401, 403].includes(code) ? 'credential_rejected'
   : code === 429 ? 'rate_limit' : 'test_failed';
 
+// Vision may also run on a model configured in DSH: "chat" follows the chat model, otherwise "route::model".
+const dshVisionModel = (model) => model === 'chat' || /^[\w.-]{1,64}::[^\s\x00-\x1f]{1,160}$/.test(model);
+const dshRoute = (ctx, model) => model === 'chat' ? chatSelection(ctx) : { provider: model.split('::')[0], model: model.split('::').slice(1).join('::') };
+
 function validated(role, value) {
   if (!Object.hasOwn(catalog, role) || typeof value?.model !== 'string' || typeof value.enabled !== 'boolean') return null;
+  if (role === 'vision' && value.provider === 'dsh') return dshVisionModel(value.model) ? { enabled: value.enabled, model: value.model, provider: 'dsh' } : null;
   let model = value.model.trim();
   if (role !== 'embedding') model = model.replace(/^models\//, '');
   if (role === 'image' && model === 'gemini-nano-banana-2.1') model = 'gemini-3.1-flash-image';
@@ -140,6 +147,7 @@ export function mediaRuntime(ctx, raw) {
 }
 
 async function createAdapter(ctx, role, choice) {
+  if (role === 'vision' && choice.provider === 'dsh') return dshVision(ctx, () => dshRoute(ctx, choice.model));
   const factory = ctx.get('maomaoQqSetup')?.mediaAdapters?.[role];
   const provider = choice.provider ?? providerFor(role, choice.model);
   const key = await resolveKey(ctx, provider);
@@ -179,7 +187,7 @@ async function testEmbedding(ctx, choice, signal) {
 async function testMedia(ctx, role, choice, signal) {
   if (role === 'embedding') return testEmbedding(ctx, choice, signal);
   const adapter = await createAdapter(ctx, role, choice);
-  if (!adapter) return { status: await resolveKey(ctx, choice.provider ?? providerFor(role, choice.model)) ? 'unavailable' : 'credential_missing' };
+  if (!adapter) return { status: choice.provider === 'dsh' || await resolveKey(ctx, choice.provider ?? providerFor(role, choice.model)) ? 'unavailable' : 'credential_missing' };
   if (role === 'vision') {
     const text = await adapter.inspect(sampleImage, '这张测试图有哪些颜色？', signal);
     return text ? { status: 'tested', text } : { status: 'test_failed' };
@@ -201,6 +209,9 @@ export async function manageMediaModel(ctx, request, signal = new AbortControlle
     const entries = Object.entries(catalog).map(([role, choices]) => ({
       role, choices, groups: groupChoices(role), saved: ctx.get('maomaoModels')?.mediaChoice?.(role) ?? null,
     }));
+    // Vision: offer "follow the chat model" first, then every DSH-configured model that accepts images.
+    const vision = entries.find(({ role }) => role === 'vision');
+    if (vision) Object.assign(vision, await dshVisionChoices(ctx, signal).catch(() => ({})));
     const credentialSources = Object.fromEntries(await Promise.all(Object.keys(credentials)
       .map(async (provider) => [provider, (await mediaCredential(ctx, provider))?.source ?? null])));
     return { entries, voices, credentialSources,
@@ -229,7 +240,7 @@ export async function manageMediaModel(ctx, request, signal = new AbortControlle
   if (!choice || !['save', 'test'].includes(action)) return { status: 'invalid' };
   try {
     if (action === 'test') return await testMedia(ctx, role, choice, AbortSignal.any([signal, AbortSignal.timeout(90_000)]));
-    if (choice.enabled && !await resolveKey(ctx, choice.provider ?? providerFor(role, choice.model))) return { status: 'credential_missing' };
+    if (choice.enabled && choice.provider !== 'dsh' && !await resolveKey(ctx, choice.provider ?? providerFor(role, choice.model))) return { status: 'credential_missing' };
     const entry = editor?.entries().find((row) => row.options.id === modelEntry);
     if (!entry) return { status: 'unavailable' };
     signal.throwIfAborted();
@@ -239,4 +250,21 @@ export async function manageMediaModel(ctx, request, signal = new AbortControlle
     const code = Number(/(?:^|_)http_(\d{3})$/.exec(error?.code ?? error?.message ?? '')?.[1]);
     return { status: action === 'test' ? httpOutcome(code) : 'save_failed' };
   }
+}
+
+async function dshVisionChoices(ctx, signal) {
+  const llm = ctx.get('llm');
+  const chat = chatSelection(ctx);
+  const { choices = [] } = await chatModels(ctx);
+  const deadline = AbortSignal.any([signal, AbortSignal.timeout(8000)]);
+  const seen = await Promise.all(choices.slice(0, 120).map(async (choice) => {
+    const info = await llm?.resolveModelInfo?.(choice.provider, choice.model, deadline).catch(() => null);
+    return info?.inputModalities?.includes('image') ? choice : null;
+  }));
+  const routes = seen.filter(Boolean);
+  const chatName = choices.find((choice) => choice.provider === chat?.provider && choice.model === chat?.model)?.name ?? chat?.model ?? '';
+  const labels = { chat: `跟随对话模型${chatName ? `（${chatName}）` : ''}`,
+    ...Object.fromEntries(routes.map((choice) => [`${choice.provider}::${choice.model}`, `${choice.name} · ${choice.provider}`])) };
+  return { chatVision: { name: chatName, sees: await chatSeesImages(ctx, chat, deadline) },
+    labels, dshModels: ['chat', ...routes.map((choice) => `${choice.provider}::${choice.model}`)] };
 }
