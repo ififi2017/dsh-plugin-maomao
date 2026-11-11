@@ -31,3 +31,23 @@ test('typing pauses grow with length, stay bounded and jitter', () => {
   assert.equal(typingPause('长'.repeat(500), fixed), 2200);
   assert.notEqual(typingPause('一样的话', { random: () => 0 }), typingPause('一样的话', { random: () => 1 }));
 });
+
+test('style nudges name the habit the last few replies repeat, and stay quiet otherwise', async () => {
+  const { styleNudge } = await import('../integrations/maomao-dsh/humanlike.mjs');
+  const today = ['被猫猫塔的重量当场封印了呗喵！', '毛茸茸虽然轻，但幸福的负担可是很沉重的喵！',
+    '(耳朵猛地一抖)那是，多少人排队还没这福气呢喵！', '所以偷着乐吧(甩尾巴)，这待遇可是全群独一份喵！'];
+  const nudge = styleNudge(today);
+  assert.match(nudge, /别带「喵」/); assert.match(nudge, /感叹号/); assert.match(nudge, /括号/);
+  assert.equal(styleNudge(['中', '这也太离谱了', '俺刚睡醒…', '你说那家烩面馆俺去过']), '');
+  assert.equal(styleNudge(['喵！', '喵！']), '', 'two lines are not a pattern yet');
+});
+
+test('the chat model gets images directly when it can see them', async () => {
+  const { chatSeesImages } = await import('../integrations/maomao-dsh/model-call.mjs');
+  const ctx = (modalities) => ({ get: (name) => name === 'llm' ? { resolveModelInfo: async () => ({ inputModalities: modalities }) } : undefined });
+  assert.equal(await chatSeesImages(ctx(['text', 'image']), { provider: 'openai', model: 'm' }), true);
+  assert.equal(await chatSeesImages(ctx(['text']), { provider: 'google', model: 'm' }), false, 'model info wins over the provider guess');
+  assert.equal(await chatSeesImages({ get() {} }, { provider: 'google' }), true);
+  assert.equal(await chatSeesImages({ get() {} }, { provider: 'deepseek', model: 'chat' }), false);
+  assert.equal(await chatSeesImages({ get() {} }, null), false);
+});

@@ -31,6 +31,10 @@ export class PrivateLedger {
       CREATE TABLE IF NOT EXISTS media_checks(
         platform TEXT PRIMARY KEY, outcome TEXT NOT NULL, checked INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS private_groups(
+        key TEXT PRIMARY KEY, platform TEXT NOT NULL, account TEXT NOT NULL, chat_id TEXT NOT NULL,
+        title TEXT NOT NULL, status TEXT NOT NULL, added INTEGER NOT NULL, last_seen INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS diagnostics(
         platform TEXT NOT NULL, kind TEXT NOT NULL, outcome TEXT NOT NULL, at INTEGER NOT NULL,
         PRIMARY KEY(platform,kind)
@@ -83,6 +87,32 @@ export class PrivateLedger {
   }
 
   close() { this.#db.close(); }
+
+  // Lark / Telegram groups. A group is enabled when its owner first @-mentions the bot there;
+  // a group switched off in the panel stays off until switched on in the panel.
+  groupStatus(key) { return this.#db.prepare('SELECT status FROM private_groups WHERE key=?').get(key)?.status ?? null; }
+
+  enableGroup({ key, platform, account, chatId, title = '' }, now = Date.now()) {
+    this.#db.prepare(`INSERT INTO private_groups VALUES (?,?,?,?,?,'enabled',?,?)
+      ON CONFLICT(key) DO UPDATE SET last_seen=excluded.last_seen, title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE title END`)
+      .run(key, platform, account, chatId, String(title).slice(0, 60), now, now);
+    return this.groupStatus(key);
+  }
+
+  seenGroup(key, title = '', now = Date.now()) {
+    this.#db.prepare("UPDATE private_groups SET last_seen=?, title=CASE WHEN ?<>'' THEN ? ELSE title END WHERE key=?")
+      .run(now, String(title).slice(0, 60), String(title).slice(0, 60), key);
+  }
+
+  setGroupStatus(key, status) {
+    if (!['enabled', 'disabled'].includes(status)) return false;
+    return this.#db.prepare('UPDATE private_groups SET status=? WHERE key=?').run(status, key).changes > 0;
+  }
+
+  groups() {
+    return this.#db.prepare('SELECT key,platform,account,chat_id AS chatId,title,status,added,last_seen AS lastSeen FROM private_groups ORDER BY added').all()
+      .map((row) => ({ ...row }));
+  }
 
   verifyRoute(route, event) {
     this.#db.prepare('INSERT OR IGNORE INTO verified_routes VALUES (?)').run(route);

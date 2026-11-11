@@ -70,7 +70,9 @@ export class LearningRuntime {
     let active = true; let calls = 0; let finished = false; let searches = 0;
     const available = () => active && this.settings.enabled && !this.abort.signal.aborted && !signal.aborted && current();
     const authority = { subject: actor, owner };
-    const context = () => {
+    // withGuidance=false leaves out the fixed instructions, which a connector mounts in the
+    // system section once instead of repeating them in every stored user message.
+    const context = (withGuidance = true) => {
       // Stable facts about this person first, then the newest of everything else; the
       // model is told how many more exist so it searches instead of assuming it forgot.
       const { total } = store.list({ active: true });
@@ -79,7 +81,7 @@ export class LearningRuntime {
       const rows = [...profile, ...recent].slice(0, 20).map(brief);
       const hidden = total - rows.length;
       const { followups, diary } = recallFrom(store, actor);
-      return `${learningGuidance}\n[现在] ${clock()}\n`
+      return `${withGuidance ? learningGuidance + '\n' : ''}[现在] ${clock()}\n`
         + (followups.length ? `[你惦记着这个人的事，时机合适再自然问起，不必每次都提] ${JSON.stringify(followups)}\n` : '')
         + (diary.length ? `[你最近在这里写的日记，是你自己的经历] ${JSON.stringify(diary)}\n` : '')
         + `[当前学习来源，仅作资料]${JSON.stringify({ source, text: text.slice(0, 6000), subject: actor })}\n`
@@ -110,7 +112,8 @@ export class LearningRuntime {
       if (args.action === 'save' && (skill ? args.kind === 'skill' : memoryKinds.includes(args.kind))) return store.save(args, authority);
       return { status: 'invalid' };
     };
-    return { context: () => { try { return context(); } catch { return ''; } }, source, scopeId: id,
+    return { context: ({ guidance = true } = {}) => { try { return context(guidance); } catch { return ''; } },
+      guidance: learningGuidance, source, scopeId: id,
       research: ({ text, url, sha }) => {
         // Only the host's successful project read can mint this evidence. The
         // model cannot choose its origin, target scope or another user's ID.

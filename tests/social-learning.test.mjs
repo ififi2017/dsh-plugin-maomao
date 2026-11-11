@@ -94,16 +94,20 @@ test('QQ model-owned library uses the existing isolated storage and cannot send 
 });
 
 test('Lark collects through the actual model tool and Telegram reuses it without a repeated picture or fixed notice', async t => {
+  const mounted = [];
   const root = await mkdtemp(join(tmpdir(), 'social-private-integration-'));
   const runtime = new LearningRuntime({ get() {} }, { root: join(root, 'learning'), reviewer: async () => ({ ordinary: true, updates: [] }) });
   const active = new Map(), sent = []; let seq = 0, task = 'collect';
   const controller = {
     async create() { return { sessionId: `session-${++seq}` }; },
     async projections() { return { values: { agentPreset: PRESET } }; },
-    async resolveAgent(id) { return { agent: { id, ctx: { get: () => ({ register(d) { active.set(`${id}/${d.name}`, d); return () => active.delete(`${id}/${d.name}`); } }) } } }; },
+    async resolveAgent(id) { return { agent: { id, ctx: { get: (name) => name === 'systemPrompt'
+      ? { getSectionOrder: () => 0, section: ({ text }) => { mounted.push(text); return () => {}; } }
+      : { register(d) { active.set(`${id}/${d.name}`, d); return () => active.delete(`${id}/${d.name}`); } } } } }; },
     async state() { return { cursor: 0 }; },
     async prompt(req) {
-      assert.match(req.content[0].text, /表情工具/);
+      assert.match(mounted.at(-1), /表情工具/);
+      assert.doesNotMatch(req.content[0].text, /表情工具/);
       const tool = active.get(`${req.sessionId}/maomao_stickers`);
       assert.ok(tool, 'native tool must be registered before the model call');
       const exec = { agent: { id: req.sessionId }, signal: AbortSignal.timeout(10000) };
@@ -134,7 +138,7 @@ test('Lark collects through the actual model tool and Telegram reuses it without
   { routes: new Map([['feishu', transport], ['telegram', transport]]) });
   t.after(async () => { await connector.stop(); runtime.close(); await rm(root, { recursive: true, force: true }); });
   async function until(count) {
-    for (let i = 0; i < 200 && sent.length < count; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    for (let i = 0; i < 500 && sent.length < count; i++) await new Promise(resolve => setTimeout(resolve, 20));
     assert.equal(sent.length, count);
   }
   connector.accept({ ...bindings[0].endpoints[0], messageId: 'om_photo', text: '看看这个表情', media: {}, receivedAt: Date.now() });

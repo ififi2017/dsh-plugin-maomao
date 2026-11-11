@@ -107,7 +107,9 @@ test('a participant can be judged after sixty seconds until the actual QQ reply 
       { messageId: 'late-participant', senderId: 'someone', content: '刚才那个梗我还有个看法' },
       { enabled: () => true });
     assert.ok(turn);
-    assert.deepEqual(judged[0].rounds, { used: 0, remaining: 3, limit: 3 });
+    // Only one person is talking, so bot-to-bot banter is capped at two rounds.
+    assert.deepEqual(judged[0].rounds, { used: 0, remaining: 2, limit: 2 });
+    assert.equal(judged[0].several_people, false);
     assert.equal(turn.current(), true);
     turn.release();
     now = anchor.receivedAt + 300_001;
@@ -115,5 +117,28 @@ test('a participant can be judged after sixty seconds until the actual QQ reply 
       { messageId: 'expired', senderId: 'someone', content: '过期以后' }, { enabled: () => true }), null);
     assert.equal(judged.length, 1);
     assert.equal(turn.current(), false);
+  } finally { await shadow.stop(); }
+});
+
+test('bot-to-bot banter stops after two rounds for one person, and uses the full setting when several people talk', async () => {
+  let now = 1_000_000;
+  const shadow = new PassiveShadow(null, { clock: () => now, debounceMs: 1, judge: async () => ({ reply: true, form: 'brief' }) });
+  const peer = { maxRounds: 4 };
+  const banter = async (id) => {
+    now += 2_000;
+    const turn = await shadow.notePeer('app-a', 'group-a', peer, { messageId: id, senderId: 'other-bot', content: `接梗 ${id}` }, { enabled: () => true });
+    turn?.release();
+    return turn;
+  };
+  try {
+    await shadow.observe(inbound('solo', '大家聊聊', { rawEventType: 'GROUP_AT_MESSAGE_CREATE' }));
+    const first = await banter('b1');
+    assert.equal(first.peerTurn.form, 'brief', 'the chosen reply form reaches the answer');
+    assert.ok(await banter('b2'));
+    assert.equal(await banter('b3'), null, 'third round in front of a single person is skipped');
+    now += 1_000;
+    await shadow.observe(inbound('second-person', '我也来', { senderId: 'another-human' }));
+    for (const id of ['c1', 'c2', 'c3', 'c4']) assert.ok(await banter(id), `${id} is allowed while two people talk`);
+    assert.equal(await banter('c5'), null);
   } finally { await shadow.stop(); }
 });

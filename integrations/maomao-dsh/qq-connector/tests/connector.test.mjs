@@ -53,17 +53,24 @@ test('QQ renders formatted replies and falls back on a definite Markdown rejecti
     await reply('native', '拍鸟最难的是**找鸟**。');
     assert.equal(sent[0].msgType, 2);
     assert.deepEqual(sent[0].markdown, { content: '拍鸟最难的是**找鸟**。' });
+    const table = '| 项目 | 状态 |\n| --- | --- |\n| 找鸟 | 完成 |';
+    await reply('native-table', table);
+    assert.equal(sent[1].msgType, 2);
+    assert.deepEqual(sent[1].markdown, { content: table });
     await assert.rejects(reply('timeout', '**投递未知**'), /timed out/);
-    assert.equal(sent.length, 2);
+    assert.equal(sent.length, 3);
     await reply('denied', '## 要点\n- **找鸟** 和 `a * b`，比 2 * 3 * 4 难。');
-    assert.equal(sent[2].msgType, 2);
-    assert.equal(sent[3].msgType, 0);
-    assert.equal(sent[3].content, '要点\n• 找鸟 和 a * b，比 2 * 3 * 4 难。');
-    assert.deepEqual(sent[2].target, sent[3].target);
-    assert.deepEqual(sent[2].extra, sent[3].extra);
+    assert.equal(sent[3].msgType, 2);
+    assert.equal(sent[4].msgType, 0);
+    assert.equal(sent[4].content, '要点\n• 找鸟 和 a * b，比 2 * 3 * 4 难。');
+    assert.deepEqual(sent[3].target, sent[4].target);
+    assert.deepEqual(sent[3].extra, sent[4].extra);
     await reply('after-denial', '还有**第二句**。');
-    assert.equal(sent.length, 5);
-    assert.equal(sent[4].content, '还有第二句。');
+    assert.equal(sent.length, 6);
+    assert.equal(sent[5].content, '还有第二句。');
+    await reply('table-fallback', '| 项目 | 状态 |\n| --- | --- |\n| 找鸟 | 完成 |');
+    assert.equal(sent[6].msgType, 0);
+    assert.equal(sent[6].content, '| 项目 | 状态 |\n| 找鸟 | 完成 |');
   } finally {
     await connector.stop();
   }
@@ -384,7 +391,7 @@ test('image reader accepts only bounded QQ media and checks file bytes', async (
     getToken: async () => 'synthetic-token',
     fetchImpl: async (_url, options) => {
       auth = options.headers.Authorization;
-      assert.equal(options.redirect, 'error');
+      assert.equal(options.redirect, 'manual');
       return new Response(png, { status: 200 });
     },
   });
@@ -459,7 +466,7 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
     assert.equal(calls.find(([kind]) => kind === 'create')[1].agentPreset, 'maomao-qq-ordinary');
     assert.equal(calls.find(([kind]) => kind === 'prompt')[1].sessionId, 'session-one');
     assert.equal(calls.find(([kind]) => kind === 'wait')[1].afterSeq, 7);
-    assert.match(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, /你好\n\[图片未能读取\]/);
+    assert.match(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, /你好\n\[这次没看到这张图。用一句自己的话带过/);
     assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
       /近期同群消息，仅供理解上下文/);
     assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
@@ -527,4 +534,64 @@ test('connector emits unmentioned messages and sends only with a valid receipt',
     }
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test('QQ image download follows one QQ-hosted redirect and retries a transient failure once', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X4XcAAAAASUVORK5CYII=', 'base64');
+  const attachment = { kind: 'image', sourceUrl: 'https://multimedia.nt.qq.com.cn/cat', name: 'cat.png' };
+  const seen = [];
+  const redirected = await loadQqImage(attachment, { fetchImpl: async (url) => {
+    seen.push(url);
+    return seen.length === 1 ? new Response(null, { status: 302, headers: { location: 'https://img.qpic.cn/cdn/cat' } })
+      : new Response(png, { status: 200 });
+  } });
+  assert.equal(redirected.mediaType, 'image/png');
+  assert.deepEqual(seen, ['https://multimedia.nt.qq.com.cn/cat', 'https://img.qpic.cn/cdn/cat']);
+  await assert.rejects(loadQqImage(attachment, { fetchImpl: async () =>
+    new Response(null, { status: 302, headers: { location: 'https://evil.example/cat' } }) }), { code: 'unsafe_source' });
+  let calls = 0;
+  const retried = await loadQqImage(attachment, { retryDelayMs: 1, fetchImpl: async () => {
+    calls++;
+    if (calls === 1) throw new TypeError('fetch failed');
+    return new Response(png, { status: 200 });
+  } });
+  assert.equal(retried.mediaType, 'image/png'); assert.equal(calls, 2);
+  calls = 0;
+  await assert.rejects(loadQqImage(attachment, { retryDelayMs: 1, fetchImpl: async () => { calls++; return new Response(null, { status: 404 }); } }), { code: 'missing' });
+  assert.equal(calls, 1, 'a missing image is not retried');
+});
+
+test('a follow-up question picks up the same sender\'s recent pictures, oldest first, at most three', async () => {
+  const { recentImagesFrom } = await import('../inbound.mjs');
+  const base = { botId: 'b', scope: 'group', chatId: 'g' };
+  const photo = (i, senderId = 'u', at = 1000 + i) => ({ ...base, receiptKey: `p${i}`, senderId, receivedAt: at, text: '',
+    attachments: [{ kind: 'image', sourceUrl: 'https://img.qpic.cn/x' }] });
+  const receipts = [photo(1), photo(2), photo(3), photo(4), photo(5, 'other'), photo(6, 'u', -500_000)];
+  const question = { ...base, receiptKey: 'q', senderId: 'u', receivedAt: 2000, text: '分析一下是谁全责', attachments: [] };
+  assert.deepEqual(recentImagesFrom(question, receipts).map((r) => r.receiptKey), ['p2', 'p3', 'p4']);
+  assert.deepEqual(recentImagesFrom({ ...question, senderId: 'nobody' }, receipts), []);
+});
+
+test('QQ chat and judge sessions rotate after their turn or age limit, and old unrecorded sessions start fresh', async () => {
+  const { sessionIsStale, SESSION_TURNS } = await import('../harness.mjs');
+  const now = 10_000_000;
+  assert.equal(sessionIsStale(null, now), true, 'a session from before turn counting is replaced');
+  assert.equal(sessionIsStale({ startedAt: now - 1000, turns: 3 }, now), false);
+  assert.equal(sessionIsStale({ startedAt: now - 1000, turns: SESSION_TURNS }, now), true);
+  assert.equal(sessionIsStale({ startedAt: now - 13 * 3_600_000, turns: 1 }, now), true);
+  const root = await mkdtemp(join(tmpdir(), 'maomao-qq-meta-'));
+  try {
+    let clock = 5_000;
+    const state = await new ConnectorState(join(root, 'state.json'), { clock: () => clock }).load();
+    await state.bindSession('bot', 'group', 'g', 'old');
+    assert.deepEqual(state.sessionMeta('bot', 'group', 'g'), { startedAt: 5_000, turns: 0 });
+    await state.noteSessionTurn('bot', 'group', 'g', 'old');
+    await state.noteSessionTurn('bot', 'group', 'g', 'someone-else');
+    assert.equal(state.sessionMeta('bot', 'group', 'g').turns, 1);
+    clock = 9_000;
+    assert.equal(await state.bindSession('bot', 'group', 'g', 'new', undefined, 'old'), 'new');
+    assert.deepEqual(state.sessionMeta('bot', 'group', 'g'), { startedAt: 9_000, turns: 0 });
+    const reloaded = await new ConnectorState(join(root, 'state.json')).load();
+    assert.equal(reloaded.sessionMeta('bot', 'group', 'g').startedAt, 9_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

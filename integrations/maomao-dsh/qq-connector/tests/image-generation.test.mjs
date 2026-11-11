@@ -52,6 +52,7 @@ test('a newly selected Gemini image model uses GenerateContent with the referenc
 });
 
 test('native image tool is bound to one admitted QQ turn and delivers only once', async () => {
+  const mounted = [];
   const root = await mkdtemp(join(tmpdir(), 'maomao-image-tool-'));
   const env = { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
     MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' };
@@ -73,7 +74,7 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
     return () => { definition = undefined; };
   } };
   const agent = { id: 'test-session', ctx: { get(name) {
-    if (name === 'systemPrompt') return { getSectionOrder: () => 0, section: () => () => {} };
+    if (name === 'systemPrompt') return { getSectionOrder: () => 0, section: ({ text }) => { mounted.push(text); return () => {}; } };
     assert.equal(name, 'tools');
     return tools;
   } } };
@@ -97,7 +98,9 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
     async prompt(req) {
       try {
         promptCount += 1;
-        assert.match(req.content[0].text, /聊天工具/);
+        // Fixed tool guidance is mounted in the system section, not stored in every user message.
+        assert.match(mounted.at(-1), /聊天工具/);
+        assert.doesNotMatch(req.content[0].text, /聊天工具/);
         const args = { prompt: '橘猫坐在月亮旁', aspect_ratio: '1:1', use_reference: true };
         assert.equal(activation({ agent }), true);
         assert.equal(activation({ agent: { id: 'unrelated' } }), false);

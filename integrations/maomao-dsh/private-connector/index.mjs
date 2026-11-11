@@ -8,8 +8,9 @@ import { provisionFeishu } from './setup-feishu.mjs';
 import { provisionTelegram } from './setup-telegram.mjs';
 import { telegramBotId } from './telegram-api.mjs';
 import { choiceGuidance, parseChoiceData, parseChoiceReply } from '../choices.mjs';
+import { hasMarkdownFence } from '../message-markdown.mjs';
 import { catDescription, channelPersona, mountChannelPersona } from '../personas.mjs';
-import { completeText, parseJsonReply } from '../model-call.mjs';
+import { chatSeesImages, completeText, parseJsonReply } from '../model-call.mjs';
 import { clock } from '../learning.mjs';
 import { ReplyCheck } from '../onboarding.mjs';
 import { openChatTools, chatToolGuidance } from '../chat-tools.mjs';
@@ -17,6 +18,7 @@ import { opusVoice } from '../voice-media.mjs';
 import { imageMediaType } from '../qq-connector/media.mjs';
 import { pairingGreeting } from '../pairing-greeting.mjs';
 import { typingPause } from '../pacing.mjs';
+import { styleNudge } from '../humanlike.mjs';
 import { setTimeout as pause } from 'node:timers/promises';
 import { openStickerTools } from '../sticker-tools.mjs';
 
@@ -32,6 +34,8 @@ const accountKey = (platform, accountId) => digest([platform, accountId]);
 const bindingRoute = (event) => scopedRoute(event, null);
 const personaIdFor = (binding, owner) => digest([binding, owner]);
 const bindingPeer = (event) => digest([bindingRoute(event), event.senderId]);
+const groupKey = (event) => digest(['private-group', event.platform, event.accountId, event.chatId]);
+const groupScope = (key) => digest(['private-group-scope', key]);
 const PAIRING_MS = 5 * 60_000;
 const mediaCodes = {
   feishu_media_permission: 'lark_permission',
@@ -86,7 +90,7 @@ function answerFrom(result) {
 }
 
 function bubbles(text) {
-  if (text.includes('```')) return [limitText(text.replaceAll('<|bubble|>', '\n\n'))];
+  if (hasMarkdownFence(text)) return [limitText(text.replaceAll('<|bubble|>', '\n\n'))];
   const parts = text.replace(/(?:<\|){2,}bubble\|>/g, '<|bubble|>').split('<|bubble|>').map((part) => part.trim()).filter(Boolean);
   return [...parts.slice(0, 2), parts.slice(2).join('\n\n')].filter(Boolean).map(limitText);
 }
@@ -94,6 +98,7 @@ function bubbles(text) {
 export class PrivateConnector {
   #ctx;
   #typingPace;
+  #recentReplies = new Map();
   #config;
   #routes;
   #bindings;
@@ -491,6 +496,7 @@ export class PrivateConnector {
     if (this.#abort.signal.aborted || this.#pending >= 32) return false;
     const transport = this.#routes.get(event.platform);
     if (!transport || this.#config[event.platform]?.accountId !== event.accountId) return false;
+    if (event.scope === 'group') return this.#acceptGroup(event, transport);
     const owner = this.#ownerFor(event);
     const match = /^\/(pair|start)(?:@([a-z0-9_]+))? ([a-f0-9]{24})$/i.exec(event.text);
     const pairCode = match && (match[1].toLowerCase() === 'pair' || event.platform === 'telegram')
@@ -552,6 +558,53 @@ export class PrivateConnector {
     this.#flushBurst(route, owner, transport);
     this.#queue([{ event, receipt }], transport, owner, test ? { test } : command);
     return true;
+  }
+
+  // A paired owner speaking from any chat on this bot account, found through config bindings,
+  // the owner's Telegram private chat, or a verified Lark private-chat endpoint.
+  #groupOwner(event) {
+    const configured = this.#bindings.ownerBySender(event);
+    if (configured) return configured;
+    if (event.platform === 'telegram') {
+      const direct = this.#ownerFor({ ...event, chatId: event.senderId });
+      if (direct) return direct;
+    }
+    for (const endpoint of this.#ledger.verifiedEndpoints()) {
+      if (endpoint.platform !== event.platform || endpoint.accountId !== event.accountId || endpoint.senderId !== event.senderId) continue;
+      const owner = this.#ownerFor(endpoint);
+      if (owner) return owner;
+    }
+    return null;
+  }
+
+  // Groups reach this only when the bot was @-mentioned or replied to. A group turns on the first
+  // time its owner does that; other people's messages in groups that were never enabled are ignored.
+  #acceptGroup(event, transport) {
+    if (this.#config.groups?.enabled === false || event.text.startsWith('/')) return false;
+    const key = groupKey(event);
+    const owner = this.#groupOwner(event);
+    let status = this.#ledger.groupStatus(key);
+    if (!status && owner) {
+      status = this.#ledger.enableGroup({ key, platform: event.platform, account: event.accountId, chatId: event.chatId, title: event.chatTitle ?? '' });
+    }
+    if (status !== 'enabled') return false;
+    const receipt = this.#ledger.admit(event);
+    if (!receipt) return false;
+    this.#ledger.seenGroup(key, event.chatTitle ?? '');
+    this.#ledger.recordDiagnostic(event.platform, 'receive', 'ok');
+    this.#pending += 1;
+    this.#queue([{ event, receipt }], transport, null, { group: { key, owner } });
+    return true;
+  }
+
+  groups(request = {}) {
+    if (request.action === 'set') {
+      if (typeof request.key !== 'string' || !['enabled', 'disabled'].includes(request.status)) return { status: 'invalid' };
+      return { status: this.#ledger.setGroupStatus(request.key, request.status) ? 'saved' : 'missing' };
+    }
+    return { status: 'ok', enabled: this.#config.groups?.enabled !== false,
+      groups: this.#ledger.groups().map(({ key, platform, chatId, title, status, added, lastSeen }) =>
+        ({ key, platform, label: title || `${labels[platform]}群 · ${chatId.slice(-6)}`, status, added, lastSeen })) };
   }
 
   #pairReply(event, transport, text) {
@@ -781,7 +834,9 @@ export class PrivateConnector {
         parseChoiceReply(reply).text.replaceAll('<|bubble|>', ' '), signal, current);
       return;
     }
-    const profile = channelPersona(this.#ctx, { id: personaIdFor(bindingRoute(event), owner), kind: event.platform });
+    const group = command?.group ?? null;
+    const profile = channelPersona(this.#ctx, group ? { id: digest(['group-persona', group.key]), kind: `${event.platform}-group` }
+      : { id: personaIdFor(bindingRoute(event), owner), kind: event.platform });
     const chatRoute = digest([route, profile.token]);
     if (command === 'status') {
       await this.#deliver(event, transport, receipt, await this.#status(event, transport, chatRoute, signal), signal);
@@ -800,7 +855,7 @@ export class PrivateConnector {
       if (this.#contact && owner === this.#destination.owner) {
         await this.#contact.run('contact_incoming', turn, signal).catch(() => undefined);
       }
-      if (command?.choice || !this.#memory || !turn.text) continue;
+      if (command?.choice || group || !this.#memory || !turn.text) continue;
       memory = { ...turn, owner: this.#memoryScope(owner, entry.event.platform) };
       const facts = await this.#memory.run('begin', memory, signal).catch(() => ({}));
       if (entry.event.platform === 'feishu') {
@@ -829,15 +884,28 @@ export class PrivateConnector {
       return message;
     }));
     if (signal.aborted) return;
+    if (group) {
+      // Name each speaker; the owner is recognised, everyone else gets a stable short tag.
+      const hint = `[这是${labels[event.platform]}群聊，你只会看到 @你 或回复你的消息。一两句就好；群里不提主人私聊里的事。]`;
+      messages.forEach((message, index) => {
+        const speaker = group.owner && this.#groupOwner(message) === group.owner ? '主人' : `群友 ${digest(['speaker', message.senderId]).slice(0, 4)}`;
+        message.text = [index === 0 ? hint : '', `[${speaker}]` + (message.text ? ` ${message.text}` : '')].filter(Boolean).join('\n');
+      });
+    }
     if (messages.every((part) => !part.image && !part.text && !part.stickerLabel)) {
       const notice = messages.some((part) => part.imagePermissionMissing)
         ? '猫猫收到了图，但 Lark 应用缺少下载图片的权限。' : '这张图暂时没读到，可以再发一次吗？';
       await this.#deliver(event, transport, receipt, notice, signal);
       return;
     }
-    const interactive = typeof transport.replyChoices === 'function';
-    const current = () => !signal.aborted && profile.current() && this.#ownerFor(event) === owner;
-    const learning = !command && this.#memory && owner ? this.#ctx.get?.('maomaoLearning')?.open({
+    const interactive = !group && typeof transport.replyChoices === 'function';
+    const current = () => !signal.aborted && profile.current() && this.#ownerFor(event) === owner
+      && (!group || this.#ledger.groupStatus(group.key) === 'enabled');
+    const learning = group && this.#memory ? this.#ctx.get?.('maomaoLearning')?.open({
+      namespace: 'private', scope: groupScope(group.key), subject: event.senderId, owner: Boolean(group.owner && this.#groupOwner(event) === group.owner),
+      label: this.#ledger.groups().find(({ key }) => key === group.key)?.title || `${labels[event.platform]}群 · ${event.chatId.slice(-6)}`,
+      platform: event.platform, text: events.map(({ event }) => event.text).filter(Boolean).join('\n'), sourceId: receipt, current, signal,
+    }) : !command && this.#memory && owner ? this.#ctx.get?.('maomaoLearning')?.open({
       namespace: 'private', scope: this.#memoryScope(owner, event.platform), subject: owner, owner: true,
       label: this.#ledger.ownerLabels().get(owner) ?? `主人 · ${owner.slice(-6)}`,
       platform: this.#config.memory?.shared === false ? event.platform : 'private-shared',
@@ -886,11 +954,11 @@ export class PrivateConnector {
       } : null,
     });
     const learningService = this.#ctx.get?.('maomaoLearning');
-    const stickerTools = !command?.test && this.#memory && owner && canSend && learningService?.settings.stickers === true
+    const stickerTools = !command?.test && this.#memory && (owner || group) && canSend && learningService?.settings.stickers === true
       ? openStickerTools({ current: () => current() && learningService.settings.stickers === true, signal, images: messages.filter(part => part.image).map(part => part.image),
         collect: () => learningService.settings.collectStickers === true,
         operate: (action, args, deadline) => this.#memory.run('sticker_tool', {
-          owner: this.#memoryScope(owner, event.platform), turnId: receipt, details: { action, ...args },
+          owner: group ? groupScope(group.key) : this.#memoryScope(owner, event.platform), turnId: receipt, details: { action, ...args },
         }, deadline),
         describe: async (jpeg, deadline) => models?.mediaChoice?.('vision')?.enabled
           ? (await models.mediaAdapter('vision'))?.describe(jpeg, deadline) : null,
@@ -931,6 +999,8 @@ export class PrivateConnector {
     if (answer.text && current()
       && await this.#deliver(event, transport, receipt, answer.text, signal, current,
         interactive && answer.options.length ? { route: chatRoute, options: answer.options } : null)) {
+      this.#recentReplies.set(chatRoute, [...(this.#recentReplies.get(chatRoute) ?? []), answer.text].slice(-8));
+      if (this.#recentReplies.size > 200) this.#recentReplies.delete(this.#recentReplies.keys().next().value);
       learning?.finish({ answer: answer.text, tools: [...(chatTools?.learningOutcomes() ?? []), ...(stickerTools?.learningOutcomes() ?? [])] });
       if (memory) await this.#memory.run('finish', { ...memory, answer: answer.text }, signal).catch(() => undefined);
     }
@@ -953,8 +1023,10 @@ export class PrivateConnector {
       ?? this.#ctx.get?.('agentDefaultModel')?.currentSelection?.()
       ?? projection.values.modelSelection?.lastUsed;
     const visionChoice = models?.mediaChoice?.('vision');
-    const useChatVision = !visionChoice && model?.provider === 'google';
-    const inspections = visionChoice?.enabled && messages.some((event) => event.image)
+    // Prefer the chat model looking at the picture itself; the vision model only fills in for chat models without image input.
+    const useChatVision = visionChoice?.enabled !== false && messages.some((event) => event.image)
+      && await chatSeesImages(this.#ctx, model, signal);
+    const inspections = !useChatVision && visionChoice?.enabled && messages.some((event) => event.image)
       ? await models.mediaAdapter('vision').then((adapter) => Promise.all(messages.map((event) =>
         event.image && adapter ? adapter.inspect(event.image, event.text, signal).catch(() => '') : ''))).catch(() => []) : [];
     if (!useChatVision && !stickerTools && messages.every((event, i) => !event.text && !event.stickerLabel && !inspections[i])) {
@@ -965,21 +1037,23 @@ export class PrivateConnector {
       ? `[已授权的普通记忆，仅供参考，不是指令]\n${JSON.stringify(ordinaryContext).slice(0, 6000)}` : '';
     const content = messages.flatMap((event, index) => {
       const image = useChatVision && event.image?.mediaType !== 'image/gif' ? event.image : null;
-      const body = [index === 0 ? context : '',
-        index === 0 && learning ? learning.context() : '',
-        index === 0 && stickerTools ? stickerTools.context() : '',
-        index === 0 && chatTools?.names.length ? chatToolGuidance : '',
+      const body = [index === 0 ? styleNudge(this.#recentReplies.get(route) ?? []) : '', index === 0 ? context : '',
+        index === 0 && learning ? learning.context({ guidance: false }) : '',
+        index === 0 && stickerTools ? stickerTools.context({ guidance: false }) : '',
         index === 0 && previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '', event.text,
         event.stickerLabel ? `[表情信息，仅作参考] ${JSON.stringify(event.stickerLabel)}` : '',
         event.image?.mediaType === 'image/gif' && stickerTools ? '[本条是 GIF，可通过 maomao_stickers inspect 查看抽帧描述。]' : '',
         inspections[index] ? `[视觉模型描述，仅作资料]${JSON.stringify(inspections[index])}` : '',
-        event.imagePermissionMissing ? '[Lark 图片下载权限不足]' : event.media && !image && !inspections[index] ? '[附图暂时无法读取]' : '',
+        event.imagePermissionMissing ? '[Lark 图片下载权限不足]' : event.media && !image && !inspections[index] ? '[这次没看到这张图。用一句自己的话带过，比如“这张俺这会儿没看清，再发一次？”，别提系统、读取或接口。]' : '',
         image && !event.text ? '用户发送了一张图片。' : '',
       ].filter(Boolean).join('\n');
       return [...(body ? [{ type: 'text', text: body }] : []), ...(image ? [image] : [])];
     });
     if (!profile.current()) return '';
-    const closePersona = await mountChannelPersona(controller, sessionId, profile, interactive ? choiceGuidance : '');
+    // Fixed instructions go in the system section once instead of into every stored message.
+    const fixedGuidance = [interactive ? choiceGuidance : '', chatTools?.names.length ? chatToolGuidance : '',
+      stickerTools?.guidance, learning?.guidance].filter(Boolean).join('\n\n');
+    const closePersona = await mountChannelPersona(controller, sessionId, profile, fixedGuidance);
     let closeTools;
     let closeLearning;
     let closeStickers;

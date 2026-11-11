@@ -20,3 +20,19 @@ export async function completeText(ctx, { system, user, maxTokens = 600, signal 
 }
 
 export const parseJsonReply = (text) => JSON.parse(text.trim().replace(/^```(?:json)?\s*|\s*```$/g, ''));
+
+// Whether the chat model can look at images itself. A model that can should get the
+// picture directly: one call fewer to fail, and it answers about what it actually sees.
+export async function chatSeesImages(ctx, selection, signal) {
+  if (!selection?.provider) return false;
+  try {
+    const info = selection.model && await ctx.get?.('llm')?.resolveModelInfo?.(selection.provider, selection.model, signal);
+    if (Array.isArray(info?.inputModalities)) return info.inputModalities.includes('image');
+  } catch { /* Fall back to the provider check below. */ }
+  return selection.provider === 'google';
+}
+
+export const chatSelection = (ctx) => {
+  const chat = ctx.get?.('maomaoModels')?.chat?.();
+  return chat?.provider && chat?.model ? chat : ctx.get?.('agentDefaultModel')?.currentSelection?.() ?? null;
+};

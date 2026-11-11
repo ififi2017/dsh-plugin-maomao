@@ -81,3 +81,19 @@ export function scoreReplies(pairs, { minSample = 8 } = {}) {
   }
   return { metrics, findings };
 }
+
+// A one-line reminder built from the cat's own last few replies. A persona rule cannot win
+// against a transcript full of "…喵！"; a reminder about this very reply usually does.
+const STAGE_DIRECTION = /[（(][^()（）\n]{2,20}[)）]/u;
+export function styleNudge(replies, { window = 6 } = {}) {
+  const recent = replies.map(plain).filter(Boolean).slice(-window);
+  if (recent.length < 3) return '';
+  const tips = [];
+  const count = (test) => recent.filter(test).length;
+  if (count((r) => /喵[！!～~。…]*$/.test(r)) >= Math.min(4, recent.length)) tips.push('最近几句都用「喵」收尾了，这句别带「喵」');
+  if (count((r) => /[！!][喵～~]*$/.test(r)) >= Math.min(4, recent.length)) tips.push('最近几句都是感叹号，这句语气放平一点');
+  if (count((r) => STAGE_DIRECTION.test(r)) >= 2) tips.push('别写括号里的动作描写，直接说话');
+  const openers = recent.map((r) => Array.from(r).slice(0, 2).join(''));
+  if (openers.length >= 3 && openers.slice(-3).every((o) => o === openers.at(-1))) tips.push(`别再用「${openers.at(-1)}」开头`);
+  return tips.length ? `[说话节奏提醒，只针对这一句：${tips.join('；')}。]` : '';
+}

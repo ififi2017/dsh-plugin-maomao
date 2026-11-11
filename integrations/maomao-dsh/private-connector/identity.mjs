@@ -7,9 +7,14 @@ const integerId = (value) => Number.isSafeInteger(value) && value > 0 ? String(v
 const text = (value) => typeof value === 'string' ? value.trim().slice(0, 12_000) : '';
 const fresh = (sent, now) => Number.isFinite(sent) && sent > 0 && sent <= now + 120_000 && now - sent <= 900_000;
 
-export function feishuInbound(accountId, event, now = Date.now()) {
+// Group chats are accepted only when the bot is @-mentioned; botOpenId comes from Lark's bot info.
+export function feishuInbound(accountId, event, now = Date.now(), botOpenId = '') {
   const { message, sender } = event ?? {};
-  if (message?.chat_type !== 'p2p' || sender?.sender_type !== 'user') return null;
+  const group = message?.chat_type === 'group';
+  if ((!group && message?.chat_type !== 'p2p') || sender?.sender_type !== 'user') return null;
+  const mentions = Array.isArray(message.mentions) ? message.mentions : [];
+  const addressed = group && Boolean(botOpenId) && mentions.some((item) => item?.id?.open_id === botOpenId);
+  if (group && !addressed) return null;
   const sentAt = Number(message.create_time);
   if (!fresh(sentAt, now)) return null;
   const senderId = id(sender.sender_id?.open_id);
@@ -18,37 +23,58 @@ export function feishuInbound(accountId, event, now = Date.now()) {
   if (!senderId || !chatId || !messageId || !/^ou_/.test(senderId)) return null;
   let body;
   try { body = JSON.parse(message.content); } catch { return null; }
-  const content = message.message_type === 'text' ? text(body?.text) : '';
+  let content = message.message_type === 'text' ? text(body?.text) : '';
+  // Lark writes mentions as @_user_N placeholders; drop the bot's, name the others.
+  for (const item of mentions) {
+    if (typeof item?.key !== 'string') continue;
+    content = content.split(item.key).join(item.id?.open_id === botOpenId ? '' : `@${text(item.name).slice(0, 32) || '群友'}`);
+  }
+  content = content.trim();
   const imageKey = message.message_type === 'image' ? id(body?.image_key) : '';
   const stickerLabel = message.message_type === 'sticker' ? '飞书表情包（没有可下载的原图）' : '';
   if (!content && !imageKey && !stickerLabel) return null;
   return Object.freeze({ platform: 'feishu', accountId, senderId, chatId, messageId, text: content,
-    receivedAt: now, sentAt, media: imageKey ? Object.freeze({ id: imageKey, type: 'image' }) : null, stickerLabel });
+    receivedAt: now, sentAt, media: imageKey ? Object.freeze({ id: imageKey, type: 'image' }) : null, stickerLabel,
+    ...(group ? { scope: 'group' } : {}) });
 }
 
-export function telegramInbound(accountId, update, now = Date.now()) {
+// In groups the bot answers only to an @username mention, a /command@bot or a reply to its own message.
+export function telegramInbound(accountId, update, now = Date.now(), username = '') {
   const message = update?.message;
-  if (message?.chat?.type !== 'private' || message.from?.is_bot !== false
+  const group = ['group', 'supergroup'].includes(message?.chat?.type);
+  if ((!group && message?.chat?.type !== 'private') || message.from?.is_bot !== false
     || message.forward_origin || message.sender_chat || message.business_connection_id) return null;
+  const raw = typeof (message.text ?? message.caption) === 'string' ? (message.text ?? message.caption) : '';
+  const handle = username ? `@${username}`.toLowerCase() : '';
+  const entities = [...(message.entities ?? []), ...(message.caption_entities ?? [])];
+  const mentioned = Boolean(handle) && entities.some((entity) => (entity?.type === 'mention' || entity?.type === 'bot_command')
+    && raw.slice(entity.offset, entity.offset + entity.length).toLowerCase().endsWith(handle))
+    || entities.some((entity) => entity?.type === 'text_mention' && String(entity.user?.id) === accountId);
+  const repliedToBot = String(message.reply_to_message?.from?.id ?? '') === accountId;
+  if (group && !mentioned && !repliedToBot) return null;
   const sentAt = message.date * 1000;
   if (!fresh(sentAt, now)) return null;
   const senderId = integerId(message.from.id);
-  const chatId = integerId(message.chat.id);
+  // Telegram group and supergroup ids are negative.
+  const chatId = group ? (Number.isSafeInteger(message.chat.id) && message.chat.id < 0 ? String(message.chat.id) : '') : integerId(message.chat.id);
   const messageId = integerId(message.message_id);
-  if (!senderId || senderId !== chatId || !messageId) return null;
+  if (!senderId || !chatId || !messageId || (!group && senderId !== chatId)) return null;
   const sticker = message.sticker;
   const photo = Array.isArray(message.photo) ? message.photo.at(-1) : null;
   const staticSticker = sticker && !sticker.is_animated && !sticker.is_video ? sticker : null;
   const fileId = id(photo?.file_id ?? staticSticker?.file_id);
-  const content = text(message.text ?? message.caption);
+  // Usernames are [A-Za-z0-9_], so the handle needs no regex escaping.
+  const content = text(handle ? raw.replace(new RegExp(handle, 'ig'), '') : raw);
   const label = sticker ? text(sticker.emoji).slice(0, 16) : '';
   if (!content && !fileId && !label) return null;
   return Object.freeze({ platform: 'telegram', accountId, senderId, chatId, messageId, text: content,
-    receivedAt: now, sentAt, media: fileId ? Object.freeze({ id: fileId, type: 'image' }) : null, stickerLabel: label });
+    receivedAt: now, sentAt, media: fileId ? Object.freeze({ id: fileId, type: 'image' }) : null, stickerLabel: label,
+    ...(group ? { scope: 'group', chatTitle: text(message.chat.title).slice(0, 60) } : {}) });
 }
 
 export class PrivateBindings {
   #owners = new Map();
+  #senders = new Map();
 
   constructor(bindings = []) {
     if (!Array.isArray(bindings)) throw new TypeError('private_bindings_invalid');
@@ -69,8 +95,14 @@ export class PrivateBindings {
         if (destinations.has(destination)) throw new TypeError('private_binding_endpoint_duplicate');
         destinations.add(destination);
         this.#owners.set(digest([platform, accountId, chatId, senderId]), digest(['ordinary-owner', owner]));
+        this.#senders.set(digest([platform, accountId, senderId]), digest(['ordinary-owner', owner]));
       }
     }
+  }
+
+  // The owner speaking anywhere on this bot account, e.g. in a group they added the bot to.
+  ownerBySender({ platform, accountId, senderId }) {
+    return this.#senders.get(digest([platform, accountId, senderId])) ?? null;
   }
 
   ownerFor({ platform, accountId, chatId, senderId }) {

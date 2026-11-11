@@ -22,20 +22,43 @@ export function imageMediaType(bytes) {
   return null;
 }
 
-export async function loadQqImage(attachment, { getToken, fetchImpl = fetch, signal } = {}) {
+const RETRYABLE = new Set(['network', 'timeout', 'http']);
+const failureCode = (error) => error?.code && typeof error.code === 'string' && !error.code.startsWith('ERR_') && !error.code.startsWith('UND_')
+  ? error.code : error?.name === 'TimeoutError' ? 'timeout' : 'network';
+
+// QQ media links are sometimes slow or briefly unavailable; one retry turns most of
+// those into a picture the cat can actually see.
+export async function loadQqImage(attachment, { getToken, fetchImpl = fetch, signal, retryDelayMs = 800 } = {}) {
   if (attachment?.kind !== 'image') return null;
   const url = qqMediaUrl(attachment.sourceUrl ?? '');
   if (!url) return null;
   const token = typeof getToken === 'function' ? await getToken() : '';
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetchQqImage(url, attachment, { token, fetchImpl, signal });
+    } catch (error) {
+      const code = failureCode(error);
+      if (attempt > 0 || signal?.aborted || !RETRYABLE.has(code)) throw Object.assign(error, { code });
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    }
+  }
+}
+
+async function fetchQqImage(url, attachment, { token, fetchImpl, signal }) {
   const timeout = AbortSignal.timeout(15_000);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const response = await fetchImpl(url, {
-    method: 'GET', redirect: 'error', signal: combined,
-    headers: token ? { Authorization: `QQBot ${token}` } : {},
-  });
-  if (!response.ok) throw mediaError(response.status === 404 || response.status === 410 ? 'missing'
+  const headers = token ? { Authorization: `QQBot ${token}` } : {};
+  let response = await fetchImpl(url, { method: 'GET', redirect: 'manual', signal: combined, headers });
+  // Follow one redirect, and only to another QQ media host.
+  if (response.status >= 300 && response.status < 400) {
+    const next = qqMediaUrl(new URL(response.headers.get('location') ?? '', url).href);
+    await response.body?.cancel().catch(() => undefined);
+    if (!next) throw mediaError('unsafe_source');
+    response = await fetchImpl(next, { method: 'GET', redirect: 'error', signal: combined, headers });
+  }
+  if (!response.ok) throw mediaError(response.status >= 500 ? 'http' : response.status === 404 || response.status === 410 ? 'missing'
     : response.status === 401 || response.status === 403 ? 'permission'
-      : response.status === 429 ? 'rate_limit' : 'http');
+      : response.status === 429 ? 'rate_limit' : 'client_error');
   if (!response.body) throw mediaError('empty');
   const declared = Number(response.headers.get('content-length'));
   if (declared > MAX_IMAGE_BYTES) {
