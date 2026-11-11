@@ -33,7 +33,8 @@ export function openStickerTools({ current, signal, images = [], operate, descri
     output: { schema: { type: 'object', properties: { status: { type: 'string' }, data: { type: 'string' } }, required: ['status', 'data'] },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
   };
-  return { context: () => `${stickerGuidance}\n[本轮可查看的表情候选] ${JSON.stringify(candidates.map(({ id }) => ({ id })))}\n收藏${canCollect() ? '已开启' : '已关闭'}；先判断图片是否适合再收藏。`,
+  return { guidance: stickerGuidance,
+    context: ({ guidance = true } = {}) => `${guidance ? stickerGuidance + '\n' : ''}[本轮可查看的表情候选] ${JSON.stringify(candidates.map(({ id }) => ({ id })))}\n收藏${canCollect() ? '已开启' : '已关闭'}；先判断图片是否适合再收藏。`,
     outcome: () => outcome,
     learningOutcomes: () => outcomes,
     bind(sessionId, tools) {

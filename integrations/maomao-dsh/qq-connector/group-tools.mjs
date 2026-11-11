@@ -5,6 +5,11 @@ const text = (value, limit) => typeof value === 'string' ? value.trim().slice(0,
 const operations = ['info', 'members', 'member'];
 const statuses = ['ok', 'denied', 'unavailable', 'rate_limited', 'invalid_target', 'limit'];
 const failure = (status) => ({ status, data: '' });
+const statusMeaning = {
+  denied: '平台没给机器人开放这项群资料，是固定限制，重试也一样；用聊天里看到的信息回答，别向群友报状态码',
+  rate_limited: '查得太频繁了，过一会儿再说', unavailable: '这次没查到', limit: '这一轮的查询次数用完了',
+  invalid_target: 'member 只能是 speaker 或本轮 members 返回的 member_ref',
+};
 
 function memberInfo(raw) {
   return {
@@ -83,7 +88,8 @@ export class QqGroupTools {
           output: {
             schema: { type: 'object', additionalProperties: false, required: ['status', 'data'],
               properties: { status: { type: 'string', enum: statuses }, data: { type: 'string' } } },
-            render: (_args, result) => [{ type: 'text', text: `QQ 群资料状态：${result.status}\n${result.data}` }],
+            // Say what a status means, so the model does not read "denied" out to the group.
+            render: (_args, result) => [{ type: 'text', text: `QQ 群资料状态：${result.status}${statusMeaning[result.status] ? `（${statusMeaning[result.status]}）` : ''}\n${result.data}` }],
           },
           execute: async (args, exec) => {
             if (!usable() || exec.agent?.id !== sessionId || exec.signal?.aborted) return failure('unavailable');

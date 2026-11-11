@@ -4,6 +4,7 @@ import { manageChatModel } from './model-config.mjs';
 import { manageMediaModel } from './model-media.mjs';
 import { manageMemorySettings } from './memory-settings.mjs';
 import { readMemoryView } from './memory-view.mjs';
+import { manageStickers } from './integrations/maomao-dsh/sticker-library.mjs';
 import { LearningRuntime } from './integrations/maomao-dsh/learning.mjs';
 import { PublicBrowser } from './integrations/maomao-dsh/browser-runtime.mjs';
 import { manageWeb } from './web-settings.mjs';
@@ -142,6 +143,16 @@ class MaomaoPanel extends TypertRemoteService {
     return readMemoryView(this.ctx, request);
   }
 
+  privateGroups(request) {
+    requireOwner(this.ctx);
+    return this.ctx.get('maomaoPrivate')?.groups?.(request) ?? { status: 'ok', enabled: false, groups: [] };
+  }
+
+  stickers(request) {
+    requireOwner(this.ctx);
+    try { return manageStickers(request); } catch { return { status: 'failed' }; }
+  }
+
   learning(request) {
     requireOwner(this.ctx);
     return this.ctx.get('maomaoLearning')?.panel(request) ?? { status: 'unavailable' };
@@ -211,7 +222,7 @@ class MaomaoPanel extends TypertRemoteService {
 }
 
 // Register the JavaScript method with Typert's source-mode discovery.
-for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'learning', 'personas', 'webSettings']) {
+for (const name of ['status', 'pair', 'replyCheck', 'renameOwner', 'unbind', 'previewShare', 'channelSetup', 'qqDirectMessageSettings', 'qqPeerSettings', 'chatModel', 'mediaModel', 'embeddingIndex', 'memorySettings', 'memoryView', 'privateGroups', 'stickers', 'learning', 'personas', 'webSettings']) {
   Remote(MaomaoPanel.prototype[name], { name, addInitializer: (fn) => initializers.push(fn) });
 }
 

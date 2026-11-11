@@ -146,3 +146,19 @@ export function textBubbles(text, maximum = 4) {
   if (parts.length > maximum) parts = [...parts.slice(0, maximum - 1), parts.slice(maximum - 1).join('\n\n')];
   return parts;
 }
+
+// People often post a few pictures and then ask about them in a separate message
+// ("分析一下是谁全责"). Pick that sender's own recent pictures, oldest first.
+export function recentImagesFrom(envelope, receipts, max = 3, windowMs = 120_000) {
+  if (inboundImage(envelope) || !envelope.senderId) return [];
+  const found = [];
+  for (const source of receipts) {
+    const age = envelope.receivedAt - source.receivedAt;
+    if (source.receiptKey === envelope.receiptKey || age < 0 || age > windowMs
+      || source.botId !== envelope.botId || source.scope !== envelope.scope || source.chatId !== envelope.chatId
+      || source.senderId !== envelope.senderId
+      || !source.attachments.some((item) => item.kind === 'image' && item.sourceUrl)) continue;
+    found.push(source);
+  }
+  return found.sort((a, b) => a.receivedAt - b.receivedAt).slice(-max);
+}

@@ -112,7 +112,7 @@ export class TelegramTransport {
         for (const update of updates) {
           if (signal.aborted) break;
           if (!Number.isSafeInteger(update?.update_id) || update.update_id < 0) continue;
-          const event = telegramInbound(this.#botId, update);
+          const event = telegramInbound(this.#botId, update, Date.now(), this.username);
           if (event) await receive(event);
           if (choose && update.callback_query) await this.#callback(update.callback_query, choose, signal);
           offset = Math.max(offset ?? 0, update.update_id + 1);
@@ -201,6 +201,7 @@ export class FeishuTransport {
   #refresh;
   #sdk;
   #brand;
+  #botOpenId = '';
 
   constructor({ appId, secret, brand = 'feishu', fetchImpl = fetch, sdk }) {
     if (!/^cli_[\w-]+$/.test(appId ?? '') || !secret) throw safeError('feishu_credentials_invalid');
@@ -219,13 +220,15 @@ export class FeishuTransport {
   async run(receive, signal, choose) {
     const sdk = this.#sdk ?? await import('@larksuiteoapi/node-sdk');
     if (signal.aborted) return;
+    // Needed to tell an @mention of this bot apart from other mentions in group chats.
+    this.#botOpenId = await this.#ownOpenId(signal).catch(() => '');
     const socket = new sdk.WSClient({ appId: this.#appId, appSecret: this.#secret,
       domain: this.#brand === 'lark' ? sdk.Domain.Lark : sdk.Domain.Feishu,
       logger: quietLogger, autoReconnect: true, handshakeTimeoutMs: 12_000 });
     this.#socket = socket;
     const dispatcher = new sdk.EventDispatcher({ logger: quietLogger }).register({
       'im.message.receive_v1': async (payload) => {
-        const event = feishuInbound(this.#appId, payload);
+        const event = feishuInbound(this.#appId, payload, Date.now(), this.#botOpenId);
         if (event && !signal.aborted) await receive(event);
       },
       ...(choose ? { 'card.action.trigger': (payload) => {
@@ -269,6 +272,16 @@ export class FeishuTransport {
       return this.#token.value;
     })().finally(() => { this.#refresh = null; });
     return this.#refresh;
+  }
+
+  async #ownOpenId(signal) {
+    const token = await this.#accessToken(signal);
+    const response = await this.#fetch(`${LARK_ORIGINS[this.#brand]}/open-apis/bot/v3/info`, {
+      method: 'GET', redirect: 'error', signal: bounded(signal, 12_000), headers: { ...jsonHeaders, authorization: `Bearer ${token}` },
+    });
+    const result = await response.json().catch(() => null);
+    const openId = result?.bot?.open_id;
+    return response.ok && result?.code === 0 && typeof openId === 'string' && /^ou_[\w-]{1,120}$/.test(openId) ? openId : '';
   }
 
   async #request(path, data, signal) {

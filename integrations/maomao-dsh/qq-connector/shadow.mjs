@@ -12,6 +12,8 @@ const REPLY_GAP_MS = 4_000;
 const HOUR_MS = 60 * 60_000;
 const PEER_SETTLE_MS = 1_500;
 const MAX_PEER_RECHECKS = 2;
+export const PEER_ROUNDS_WITHOUT_HUMANS = 2;
+const LIVELY_WINDOW_MS = 5 * 60_000;
 const NAME_HINT = /猫猫|lxc|小猫|喵/i;
 const QUESTION_HINT = /[?？]|吗$|么$|呢$|有人(?:知道|懂|会|用过|拍过)|求(?:推荐|助|问)|怎么|为啥|为什么|哪(?:里|儿|个|款)|是什么|是啥|啥鸟|什么鸟|有多/;
 
@@ -234,8 +236,13 @@ export class PassiveShadow {
       await audit('skip', 'qq_reply_window_expired');
       return null;
     }
-    if (state.peerRounds >= peer.maxRounds) {
-      await audit('skip', 'banter_limit');
+    // Two bots trading lines in front of a single person reads as a script, not a chat. The
+    // full round setting applies only while several people are actually talking.
+    const severalPeople = () => new Set(state.rows.filter((row) => row.role === 'user' && now - row.at <= LIVELY_WINDOW_MS)
+      .map((row) => row.speaker)).size >= 2;
+    const roundLimit = () => severalPeople() ? peer.maxRounds : Math.min(peer.maxRounds, PEER_ROUNDS_WITHOUT_HUMANS);
+    if (state.peerRounds >= roundLimit()) {
+      await audit('skip', severalPeople() ? 'banter_limit' : 'banter_without_humans');
       return null;
     }
     const job = {};
@@ -258,7 +265,8 @@ export class PassiveShadow {
         memory = await recall?.(anchor, turn.text);
         if (!current()) return null;
         verdict = await this.#judge({ mode: 'peer_banter',
-          rounds: { used: state.peerRounds, remaining: peer.maxRounds - state.peerRounds, limit: peer.maxRounds },
+          rounds: { used: state.peerRounds, remaining: roundLimit() - state.peerRounds, limit: roundLimit() },
+          several_people: severalPeople(),
           recent_messages: this.contextFor({ ...anchor, messageId: latest.messageId }),
           ordinary_memory: memory ?? null, current: { role: 'participant', speaker: turn.speaker, text: turn.text } }, anchor);
         if (!current()) return null;
@@ -273,7 +281,7 @@ export class PassiveShadow {
       state.lastPeerBanterAt = this.#clock();
       await audit('would_reply', 'semantic_yes');
       selected = true;
-      return { anchor, peerTurn: turn, memory, current, release };
+      return { anchor, peerTurn: { ...turn, ...(verdict.form ? { form: verdict.form } : {}) }, memory, current, release };
     } catch {
       await audit('skip', 'judge_error');
       return null;

@@ -131,6 +131,22 @@ export class ConnectorState {
     return this.#data.sessions[key] ?? null;
   }
 
+  // How long a model session has been in use. Long-lived chats are rotated so the model
+  // stops imitating hundreds of its own earlier replies.
+  sessionMeta(botId, scope, chatId) {
+    return this.#data.sessionMeta?.[`${botId}:${scope}:${chatId}`] ?? null;
+  }
+
+  async noteSessionTurn(botId, scope, chatId, sessionId) {
+    return this.#write((next) => {
+      const key = `${botId}:${scope}:${chatId}`;
+      if (next.sessions[key] !== sessionId) return;
+      next.sessionMeta ??= {};
+      const meta = next.sessionMeta[key] ??= { startedAt: this.#clock(), turns: 0 };
+      meta.turns += 1;
+    });
+  }
+
   panelAllowed(botId, scope, chatId) {
     return Boolean(this.#data.panelRoutes?.[routeKey(botId, scope, chatId)]);
   }
@@ -261,6 +277,8 @@ export class ConnectorState {
       if (next.sessions[key] && next.sessions[key] !== replaced
         && (!profile || next.sessionProfiles?.[key] === profile)) return next.sessions[key];
       next.sessions[key] = sessionId;
+      next.sessionMeta ??= {};
+      next.sessionMeta[key] = { startedAt: this.#clock(), turns: 0 };
       if (profile) {
         next.sessionProfiles ??= {};
         next.sessionProfiles[key] = profile;

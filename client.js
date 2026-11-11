@@ -15,7 +15,8 @@ window.__ModuleLoader__.load({
       ok: '下载成功', lark_permission: '缺少读取消息资源的权限（99991672），检查 im:message:readonly 和版本发布',
       permission: '平台拒绝访问，检查应用权限或凭据', missing: '资源不存在或已经过期', rate_limit: '触发平台限流',
       http: '平台下载接口返回错误', size: '图片超过 5 MB', format: '图片格式不受支持',
-      empty: '平台返回空文件', network: '连接下载服务失败', timeout: '下载超时', unsafe_source: '图片来源不在 QQ 白名单内',
+      empty: '平台返回空文件', network: '连接下载服务失败（已自动重试一次）', timeout: '下载超时（已自动重试一次）', unsafe_source: '图片来源不在 QQ 白名单内',
+      client_error: '平台拒绝了下载请求',
     };
     const pairingLabels = {
       unavailable: '连接未就绪或所选主人已不可用。', expired: '配对码已失效，请重新生成。',
@@ -124,6 +125,10 @@ window.__ModuleLoader__.load({
       .maomao-panel button.maomao-destructive.maomao-confirm:not(:disabled) { background:var(--maomao-danger) !important; color:#fff; border-color:transparent !important; font-weight:600; }
       .maomao-panel .maomao-unsaved { font-weight:600; color:var(--maomao-warn); }
       .maomao-panel summary { cursor:pointer; padding:4px 0; }
+      .maomao-sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr)); gap:12px; }
+      .maomao-sticker { display:grid; gap:6px; align-content:start; border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); border-radius:12px; padding:10px; overflow-wrap:anywhere; }
+      .maomao-sticker img, .maomao-sticker-missing { width:100%; aspect-ratio:1; object-fit:contain; border-radius:8px; background:var(--maomao-tint); }
+      .maomao-sticker-missing { display:grid; place-items:center; font-size:var(--maomao-font-caption); opacity:.72; }
       .maomao-panel .maomao-disclosure { border:0; background:transparent; padding:4px 0; text-align:left; font-weight:600; color:var(--maomao-accent); width:fit-content; }
       .maomao-panel *, .maomao-panel *::before, .maomao-panel *::after { box-sizing:border-box; }
       .maomao-panel [hidden] { display:none !important; }
@@ -1200,6 +1205,126 @@ window.__ModuleLoader__.load({
     }
 
     const memoryKinds = { preference: '偏好', project: '项目', historical_note: '旧资料' };
+    // Lark / Telegram groups. They switch on when the owner first @-mentions the cat there.
+    function PrivateGroups({ invoke, platform }) {
+      const [value, setValue] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [notice, setNotice] = useState('');
+      const [refresh, setRefresh] = useState(0);
+      useEffect(() => {
+        const cancel = new AbortController();
+        invoke('privateGroups', { request: { action: 'list' } }, cancel.signal).then((next) => {
+          if (!cancel.signal.aborted) setValue(next);
+        }).catch(() => { if (!cancel.signal.aborted) setValue({ status: 'failed' }); });
+        return () => cancel.abort();
+      }, [invoke, refresh]);
+      async function toggle(group) {
+        setBusy(true); setNotice('');
+        const status = group.status === 'enabled' ? 'disabled' : 'enabled';
+        try {
+          const result = await invoke('privateGroups', { request: { action: 'set', key: group.key, status } });
+          setNotice(result?.status === 'saved' ? (status === 'enabled' ? '已在这个群开启。' : '已在这个群关闭，猫猫不会再回应这里的 @。') : '保存失败，请刷新后重试。');
+          setRefresh((n) => n + 1);
+        } catch { setNotice('保存失败，请刷新后重试。'); } finally { setBusy(false); }
+      }
+      const groups = (value?.groups ?? []).filter((group) => group.platform === platform);
+      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8 } },
+        h('h3', { style: { margin: 0 } }, '群聊'),
+        h('p', { style: mutedStyle }, `把 Bot 拉进${destinations[platform]}群后，由已绑定的主人在群里 @猫猫 一次，这个群就会开启。之后群里任何人 @ 或回复猫猫，她都会接话。`
+          + '群聊有独立的记忆和表情库，不会用到主人的私聊记忆，也不会收到主动分享。'),
+        platform === 'telegram' && h('p', { style: mutedStyle }, 'Telegram 默认的隐私模式下，Bot 只看得到 @ 它或回复它的消息，这正是猫猫需要的，不用改。'),
+        platform === 'feishu' && h('p', { style: mutedStyle }, '飞书应用需要「获取群组中 @ 机器人的消息」权限（im:message.group_at_msg:readonly），并在发布新版本后生效。'),
+        !value && h('p', { role: 'status', style: mutedStyle }, '正在读取…'),
+        value?.status === 'failed' && h('p', { role: 'alert' }, '读取群聊列表失败。'),
+        value?.status === 'ok' && value.enabled === false && h('p', { role: 'status' }, '群聊功能在配置里被关闭了（groups.enabled: false）。'),
+        value?.status === 'ok' && !groups.length && h('p', { style: { margin: 0 } }, '还没有开启的群。'),
+        ...groups.map((group) => h('div', { key: group.key, className: 'maomao-binding' },
+          h('div', { style: lineStyle }, h('strong', null, group.label),
+            h('span', { className: `maomao-status ${group.status === 'enabled' ? 'ready' : ''}` }, group.status === 'enabled' ? '已开启' : '已关闭')),
+          h('div', { style: { ...mutedStyle, fontSize: type.caption } }, `开启于 ${timestamp(group.added)} · 最近 @ ${timestamp(group.lastSeen)}`),
+          h('div', null, button(group.status === 'enabled' ? '在这个群关闭' : '重新开启', () => toggle(group), busy,
+            group.status === 'enabled' ? 'destructive' : 'primary')))),
+        notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
+    }
+
+    // Stickers the cat collected, one library per chat. Removing one also stops it being collected again.
+    const stickerResults = { removed: '已移除，猫猫之后也不会再收藏这张。', missing: '这张表情已经不在了。', unavailable: '找不到这个表情库，请刷新。',
+      invalid: '请求不符合要求。', failed: '读取表情库失败，请重试。' };
+    function StickerLibrary({ invoke }) {
+      const [catalog, setCatalog] = useState(null);
+      const [sourceId, setSourceId] = useState('');
+      const [page, setPage] = useState(0);
+      const [result, setResult] = useState(null);
+      const [refresh, setRefresh] = useState(0);
+      const [confirm, setConfirm] = useState(null);
+      const [busy, setBusy] = useState(false);
+      const [notice, setNotice] = useState('');
+      useEffect(() => {
+        const cancel = new AbortController();
+        invoke('stickers', { request: { action: 'list' } }, cancel.signal).then((value) => {
+          if (cancel.signal.aborted) return;
+          setCatalog(value);
+          const sources = value?.sources ?? [];
+          const preferred = sources.find((source) => source.count > 0) ?? sources[0];
+          setSourceId((previous) => sources.some((source) => source.id === previous) ? previous : preferred?.id ?? '');
+        }).catch(() => { if (!cancel.signal.aborted) setCatalog({ status: 'failed' }); });
+        return () => cancel.abort();
+      }, [invoke, refresh]);
+      useEffect(() => {
+        setResult(null); setConfirm(null);
+        if (!sourceId) return;
+        const cancel = new AbortController();
+        invoke('stickers', { request: { action: 'read', sourceId, page } }, cancel.signal).then((value) => {
+          if (!cancel.signal.aborted) setResult(value);
+        }).catch(() => { if (!cancel.signal.aborted) setResult({ status: 'failed' }); });
+        return () => cancel.abort();
+      }, [invoke, sourceId, page, refresh]);
+      async function remove(item) {
+        setBusy(true); setNotice('');
+        try {
+          const value = await invoke('stickers', { request: { action: 'remove', sourceId, id: item.id } });
+          setNotice(stickerResults[value?.status] ?? stickerResults.failed);
+          if (value?.status === 'removed') setRefresh((n) => n + 1);
+        } catch { setNotice(stickerResults.failed); } finally { setBusy(false); setConfirm(null); }
+      }
+      if (!catalog) return h('p', { role: 'status', style: mutedStyle }, '正在读取表情库…');
+      if (catalog.status !== 'ok') return h('p', { role: 'alert' }, stickerResults.failed);
+      const intro = h('p', { style: mutedStyle }, '猫猫在聊天里看到可复用、不含隐私的表情时会自己收藏，之后按语气挑着发。每个群和私聊各有一个表情库。'
+        + '收藏需要在「模型与能力 → 识图」启用识图，并在「自主学习」允许收藏表情。');
+      if (!catalog.sources.length) {
+        return h('section', { style: { ...sectionStyle, ...stackStyle } }, h('h3', { style: { margin: 0 } }, '表情库'), intro,
+          h('p', { style: { margin: 0 } }, '还没有任何表情库。猫猫第一次在某个聊天里看图后就会建立。'));
+      }
+      const pages = result?.status === 'ok' ? Math.max(1, Math.ceil(result.total / result.pageSize)) : 1;
+      return h('section', { style: { ...sectionStyle, ...stackStyle } },
+        h('h3', { style: { margin: 0 } }, '表情库'), intro,
+        h('label', { style: lineStyle }, '查看',
+          h('select', { style: inputStyle, value: sourceId, onChange: (event) => { setSourceId(event.target.value); setPage(0); setNotice(''); } },
+            catalog.sources.map((source) => h('option', { key: source.id, value: source.id },
+              `${source.label}${source.count === null ? '' : ` · ${source.count} 张`}`))),
+          button('刷新', () => setRefresh((n) => n + 1), busy)),
+        notice && h('p', { role: 'status', style: { margin: 0 } }, notice),
+        !result && h('p', { role: 'status', style: mutedStyle }, '正在读取…'),
+        result && result.status !== 'ok' && h('p', { role: 'alert' }, stickerResults[result.status] ?? stickerResults.failed),
+        result?.status === 'ok' && result.total === 0 && h('p', { style: mutedStyle }, '这个聊天还没有收藏的表情。'),
+        result?.status === 'ok' && result.total > 0 && h('div', { className: 'maomao-sticker-grid' },
+          result.items.map((item) => h('article', { key: item.id, className: 'maomao-sticker' },
+            item.image ? h('img', { src: item.image, alt: item.description, loading: 'lazy' })
+              : h('div', { className: 'maomao-sticker-missing' }, '图片过大或缺失'),
+            h('strong', null, item.description),
+            h('div', { style: { ...mutedStyle, fontSize: type.caption } }, [item.category, item.text && `图中文字：${item.text}`]
+              .filter(Boolean).join(' · ')),
+            item.reason && h('div', { style: { fontSize: type.caption } }, `适合：${item.reason}`),
+            h('div', { style: { ...mutedStyle, fontSize: type.caption } }, `收藏于 ${timestamp(item.collected)}${item.lastSent ? ` · 最近发送 ${timestamp(item.lastSent)}` : ''}`),
+            confirm === item.id
+              ? h('div', { style: lineStyle }, button('确认移除', () => remove(item), busy, 'confirmDestructive'), button('取消', () => setConfirm(null), busy))
+              : h('div', null, button('移除', () => { setConfirm(item.id); setNotice(''); }, busy, 'destructive'))))),
+        result?.status === 'ok' && pages > 1 && h('div', { style: lineStyle },
+          button('上一页', () => setPage(page - 1), busy || page === 0),
+          h('span', null, `第 ${page + 1} / ${pages} 页`),
+          button('下一页', () => setPage(page + 1), busy || page + 1 >= pages)));
+    }
+
     const memoryStates = { active: '有效', expired: '已过期', superseded: '已更新', archived: '已归档', forgotten: '已遗忘' };
 
     function MemoryView({ invoke, revision }) {
@@ -1462,6 +1587,7 @@ window.__ModuleLoader__.load({
               h('div', { hidden: channelTab !== 'bindings', style: stackStyle },
                 h(BindingManagement, { key: `management-${platform}`, entries: channelRoutes, owners: snapshot.bindings.private,
                   platform, invoke, onChange, canRelink, onRelink: openRelink }),
+                platform !== 'qq' && h(PrivateGroups, { key: `groups-${platform}`, invoke, platform }),
                 relink ? h(BindingControls, { key: relink.id, snapshot, invoke, platform, relink,
                   closeRelink: () => setRelink(null), onBound: () => { setRelink(null); onChange(); } })
                   : h(Disclosure, { key: `add-${platform}-${channelRoutes.length}`, title: '添加绑定', initial: !channelRoutes.length },
@@ -1481,9 +1607,10 @@ window.__ModuleLoader__.load({
                 onChange: modelTab => go({ modelTab }), dirty: id => draftKeys.some(key => key === `models:${id}` || key.startsWith(`models:${id}:`)) }),
               modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : modelTab === 'web' ? h(WebSettings, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
             view === 'memory' && h(ReactFragment, null,
-              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['learning', '自主学习'], ['library', '原有记忆'], ['settings', '范围与共享'], ['index', '向量索引']],
+              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['learning', '自主学习'], ['stickers', '表情库'], ['library', '原有记忆'], ['settings', '范围与共享'], ['index', '向量索引']],
                 onChange: memoryTab => go({ memoryTab }), dirty: id => draftKeys.some(key => key.startsWith('memory:') && draftDestination(key).memoryTab === id) }),
               memoryTab === 'learning' && h(LearningView, { invoke, drafts }),
+              memoryTab === 'stickers' && h(StickerLibrary, { invoke }),
               memoryTab === 'library' && h(MemoryView, { invoke, revision }),
               memoryTab === 'settings' && h(ReactFragment, null,
                 h(StatusCard, { title: '当前记忆范围', rows: [['私聊普通记忆', enabled(snapshot.memory.private)],

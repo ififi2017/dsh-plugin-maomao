@@ -67,6 +67,7 @@ class MemeStore:
               CREATE TABLE IF NOT EXISTS calls(kind TEXT NOT NULL,created REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY,speaker TEXT NOT NULL,text TEXT NOT NULL,observed REAL NOT NULL);
               CREATE TABLE IF NOT EXISTS query_vectors(id TEXT NOT NULL,model TEXT NOT NULL,vector TEXT NOT NULL,created REAL NOT NULL,PRIMARY KEY(id,model));
+              CREATE TABLE IF NOT EXISTS removed(id TEXT PRIMARY KEY,removed REAL NOT NULL);
             """)
         self.path.chmod(0o600)
 
@@ -131,6 +132,10 @@ class MemeStore:
             return None
         raw = path.read_bytes()
         digest = hashlib.sha256(raw).hexdigest()
+        # The owner removed this sticker in the panel; do not collect it again.
+        with self.db() as db:
+            if db.execute("SELECT 1 FROM removed WHERE id=?", (digest,)).fetchone():
+                return None
         _, ext, dhash = image_input(path)
         if not isinstance(result, dict) or result.get("personal_or_sensitive") is not False:
             return None

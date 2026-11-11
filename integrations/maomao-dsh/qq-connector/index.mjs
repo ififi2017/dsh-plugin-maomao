@@ -1,4 +1,5 @@
 import { dirname, join, resolve } from 'node:path';
+import { chatSeesImages, chatSelection } from '../model-call.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { setTimeout as wait } from 'node:timers/promises';
@@ -14,7 +15,7 @@ import { HarnessShadowJudge } from './judge.mjs';
 import { qqCommand, qqPersonaReply, sidReply, statusReply } from './commands.mjs';
 import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
 import { GeminiImageGeneration, OpenAiImageGeneration } from './image-generation.mjs';
-import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, SPLIT_IMAGE_WAIT_MS,
+import { allowedInbound, inboundImage, normalizeInbound, recentImageFor, recentImagesFrom, SPLIT_IMAGE_WAIT_MS,
   textBubbles, waitsForSplitImage } from './inbound.mjs';
 import { hasChatMarkdown, plainChatMarkdown } from '../message-markdown.mjs';
 import { loadQqImage } from './media.mjs';
@@ -73,6 +74,7 @@ export class MaomaoQqConnector {
   #queues = new Map();
   #shadow;
   #groupTools = new QqGroupTools();
+  #recentReplies = new Map();
   #ordinary;
   #stickers = null;
   #mediaJobs = new Set();
@@ -648,6 +650,10 @@ export class MaomaoQqConnector {
         if (!current()) return;
         linkedImage = recentImageFor(envelope, this.#observed.values());
       }
+      // When the question has no picture of its own, look at what the same person just posted.
+      const recentImages = !test && !peerTurn && !linkedImage && !inboundImage(envelope)
+        ? recentImagesFrom(envelope, this.#observed.values(), 3) : [];
+      linkedImage ??= recentImages.at(-1) ?? null;
       const source = linkedImage ?? envelope;
       const attachment = inboundImage(source);
       const quoted = !peerTurn && attachment && source.quotedImages?.includes(attachment);
@@ -656,6 +662,9 @@ export class MaomaoQqConnector {
       const visionChoice = models?.mediaChoice?.('vision');
       const signal = AbortSignal.any([this.#abort.signal, AbortSignal.timeout(120_000)]);
       let images = test || peerTurn ? [] : await this.loadImages(source.receiptKey);
+      const earlierImages = recentImages.length > 1
+        ? (await Promise.all(recentImages.slice(0, -1).map((item) => this.loadImages(item.receiptKey)))).flat()
+          .filter((image) => image.mediaType !== 'image/gif') : [];
       const stickerImages = images;
       let imageDescription = peerTurn ? null : this.#imageDetails.get(source.receiptKey);
       // The standard Gemini image route has no GIF input. With enrichment enabled, use the same JPEG preview.
@@ -671,7 +680,12 @@ export class MaomaoQqConnector {
       }
       if (!current()) return;
       const reference = images[0];
-      if (visionChoice && reference) {
+      // The chat model looks at the picture itself when it can; the separate vision
+      // model only describes it for chat models that cannot take images.
+      const directVision = Boolean(reference) && visionChoice?.enabled !== false
+        && await chatSeesImages(this.#ctx, chatSelection(this.#ctx), signal);
+      if (directVision && earlierImages.length) images = [...earlierImages, ...images];
+      if (visionChoice && reference && !directVision) {
         if (visionChoice.enabled) {
           this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
           imageDescription = await models.mediaAdapter('vision').then(async (adapter) => {
@@ -706,7 +720,7 @@ export class MaomaoQqConnector {
           label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
           text: envelope.text, sourceId: envelope.receiptKey, current, signal }) : null;
       const learningService = this.#ctx.get?.('maomaoLearning');
-      const stickerTools = !test && !peerTurn && learningService?.settings.stickers === true && this.#config.stickers?.enabled !== false
+      const stickerTools = !test && learningService?.settings.stickers === true && this.#config.stickers?.enabled !== false
         ? openStickerTools({ current: () => current() && learningService.settings.stickers === true, signal, images: stickerImages,
           collect: () => learningService.settings.collectStickers === true && this.#config.stickers?.collect !== false,
           operate: (action, args) => {
@@ -741,6 +755,7 @@ export class MaomaoQqConnector {
         passive,
         peerTurn,
         choices,
+        recentReplies: this.#recentReplies.get(`${envelope.botId}:${envelope.scope}:${envelope.chatId}`) ?? [],
         owner: !peerTurn && this.#isOwner(envelope),
         models,
         signal,
@@ -771,6 +786,11 @@ export class MaomaoQqConnector {
         throw error;
       });
       test?.(sent.length ? 'sent' : 'delivery_failed');
+      if (sent.length) {
+        const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
+        this.#recentReplies.set(key, [...(this.#recentReplies.get(key) ?? []), answer].slice(-8));
+        if (this.#recentReplies.size > 200) this.#recentReplies.delete(this.#recentReplies.keys().next().value);
+      }
       if (sent.length) learning?.finish({ answer, tools: [...(chatTools?.learningOutcomes() ?? []), ...(stickerTools?.learningOutcomes() ?? [])] });
       if (!test && !stickerTools && this.#stickers && !card && !choiceProfile && !limit
         && sent.length === textBubbles(answer, envelope.scope === 'group' ? 4 : 3).length

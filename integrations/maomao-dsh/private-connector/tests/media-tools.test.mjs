@@ -61,6 +61,7 @@ test('Lark uploads native image/Opus then replies, with revocation checked betwe
 });
 
 test('both private connectors expose native tools with no keyword gate and suppress duplicate text', async () => {
+  const mounted = [];
   const root = await mkdtemp(join(tmpdir(), 'maomao-private-tools-'));
   const sent = [];
   const active = new Map();
@@ -71,10 +72,12 @@ test('both private connectors expose native tools with no keyword gate and suppr
   const controller = {
     async create() { return { sessionId: `session-${++nextSession}` }; },
     async projections() { return { values: { agentPreset: PRESET } }; },
-    async resolveAgent(id) { return { agent: { id, ctx: { get: () => toolsFor(id) } } }; },
+    async resolveAgent(id) { return { agent: { id, ctx: { get: (name) => name === 'systemPrompt'
+      ? { getSectionOrder: () => 0, section: ({ text }) => { mounted.push(text); return () => {}; } } : toolsFor(id) } } }; },
     async state() { return { cursor: 0 }; },
     async prompt(req) {
-      assert.match(req.content[0].text, /聊天工具/);
+      assert.match(mounted.at(-1), /聊天工具/);
+      assert.doesNotMatch(req.content[0].text, /聊天工具/);
       const tool = active.get(`${req.sessionId}/maomao_generate_image`);
       assert.ok(tool);
       const value = await tool.execute({ prompt: 'a flower', aspect_ratio: '1:1', use_reference: false },

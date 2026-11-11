@@ -129,7 +129,7 @@ test('Telegram polling recovers from a transient reload conflict and anchors its
   await assert.rejects(webhook.run(() => {}, AbortSignal.timeout(1000)), /telegram_webhook/);
 });
 
-test('Feishu dispatches only private user events and replies with an idempotency UUID', async () => {
+test('Feishu dispatches private user events, ignores group messages that do not @ the bot, and replies with an idempotency UUID', async () => {
   const abort = new AbortController();
   let stopped = false;
   let posts = 0;
@@ -150,6 +150,7 @@ test('Feishu dispatches only private user events and replies with an idempotency
       if (url.endsWith('/tenant_access_token/internal')) {
         return Response.json({ code: 0, tenant_access_token: 'synthetic-token', expire: 7200 });
       }
+      if (url.endsWith('/bot/v3/info')) return Response.json({ code: 0, bot: { open_id: 'ou_bot' } });
       if (url.endsWith('/resources/img_test?type=image')) {
         assert.equal(request.method, 'GET');
         return Response.json({ code: 99991672 }, { status: 400 });
@@ -499,4 +500,45 @@ test('scheduled check-ins are written by the chat model, may be declined, and fa
     reply = null;
     assert.equal((await live.runScheduled({ preview: true })).text, '猫猫在窗边伸了个懒腰。等你有空再聊喵。');
   } finally { await live.stop(); }
+});
+
+test('a Lark or Telegram group switches on when its owner @-mentions the cat, labels speakers, and can be switched off', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-private-group-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dm = { platform: 'telegram', accountId: '2000', chatId: '1001', senderId: '1001' };
+  const group = { platform: 'telegram', accountId: '2000', chatId: '-100500', scope: 'group', chatTitle: '猫猫测试群' };
+  const prompts = [];
+  const replies = [];
+  const sessions = [];
+  const controller = {
+    async create() { sessions.push(`session-${sessions.length + 1}`); return { sessionId: sessions.at(-1) }; },
+    async projections() { return { values: { agentPreset: PRESET } }; },
+    async state() { return { cursor: 0 }; },
+    async prompt(request) { prompts.push(request); },
+    async wait() { return { reason: 'idle', output: { records: [{ event: { type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: '在呢。' }] } } } }] } }; },
+  };
+  const route = { async reply(event) { replies.push(`${event.chatId}:${event.messageId}`); return '90'; } };
+  const connector = new PrivateConnector({ sessionController: controller }, {
+    stateRoot: root, memory: { enabled: false }, telegram: { accountId: '2000', debounceMs: 0 },
+    bindings: [{ owner: 'owner', endpoints: [dm] }],
+  }, { routes: new Map([['telegram', route]]) });
+  const say = (messageId, senderId, text) => connector.accept({ ...group, senderId, messageId, text, receivedAt: Date.now() });
+  const settle = async (count) => { const end = Date.now() + 2000; while (replies.length < count && Date.now() < end) await pause(20); };
+  try {
+    assert.equal(say('1', '3003', '猫猫在吗'), false, 'a stranger cannot switch a group on');
+    assert.equal(say('2', '1001', '猫猫来认识一下大家'), true, 'the owner switches it on');
+    await settle(1);
+    assert.equal(say('3', '3003', '你好呀'), true, 'now anyone who @-mentions the cat gets a reply');
+    await settle(2);
+    assert.deepEqual(replies, ['-100500:2', '-100500:3']);
+    assert.match(prompts[0].content[0].text, /群聊/);
+    assert.match(prompts[0].content[0].text, /\[主人\] 猫猫来认识一下大家/);
+    assert.match(prompts[1].content[0].text, /\[群友 [0-9a-f]{4}\] 你好呀/);
+    assert.equal(sessions.length, 1, 'the group has its own single session');
+    const listed = connector.groups();
+    assert.deepEqual(listed.groups.map(({ label, status }) => [label, status]), [['猫猫测试群', 'enabled']]);
+    assert.equal(connector.groups({ action: 'set', key: listed.groups[0].key, status: 'disabled' }).status, 'saved');
+    assert.equal(say('4', '1001', '还在吗'), false, 'a group switched off in the panel stays off, even for the owner');
+  } finally { await connector.stop(); }
 });
