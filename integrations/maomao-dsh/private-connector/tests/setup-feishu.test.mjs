@@ -26,7 +26,7 @@ test('official QR setup provisions only a new app and writes private credentials
         assert.equal(options.createOnly, true);
         assert.equal(options.appId, undefined);
         assert.deepEqual(options.addons, { preset: false,
-          scopes: { tenant: ['im:message.p2p_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message:readonly'] },
+          scopes: { tenant: ['im:message.p2p_msg:readonly', 'im:message.group_at_msg:readonly', 'im:message:send_as_bot', 'im:resource', 'im:message:readonly'] },
           events: { items: { tenant: ['im.message.receive_v1'] } } });
         options.onQRCodeReady({ url: 'https://open.feishu.cn/page/launcher?user_code=synthetic-code&createOnly=true&addons=synthetic-addons', expireIn: 300 });
         options.onStatusChange({ status: 'domain_switched' });

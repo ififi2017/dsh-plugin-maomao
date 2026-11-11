@@ -1,7 +1,7 @@
 window.__ModuleLoader__.load({
   id: 'maomao-dsh-panel',
   factory(require) {
-    const { createElement: h, Fragment: ReactFragment, useCallback, useEffect, useState, useSyncExternalStore } = require('react');
+    const { createElement: h, Fragment: ReactFragment, useCallback, useEffect, useRef, useState, useSyncExternalStore } = require('react');
     const states = { ready: '已连接', waiting: '等待连接', off: '未启用' };
     const sharedMemoryStates = { off: '未启用', active: '已共享', waiting_channels: '已开启，待接入另一渠道',
       waiting_owner: '已开启，待绑定同一主人' };
@@ -125,6 +125,14 @@ window.__ModuleLoader__.load({
       .maomao-panel button.maomao-destructive.maomao-confirm:not(:disabled) { background:var(--maomao-danger) !important; color:#fff; border-color:transparent !important; font-weight:600; }
       .maomao-panel .maomao-unsaved { font-weight:600; color:var(--maomao-warn); }
       .maomao-panel summary { cursor:pointer; padding:4px 0; }
+      .maomao-terminal { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--maomao-font-caption); line-height: 1.5;
+        background: #111418; color: #d7dde5; border-radius: 10px; padding: 10px 12px; max-height: 60vh; overflow: auto; overflow-wrap: anywhere; }
+      .maomao-terminal pre { white-space: pre-wrap; margin: 4px 0 4px 16px; color: #aab4c0; font: inherit; }
+      .maomao-terminal summary { padding: 0; display: inline; color: #aab4c0; }
+      .maomao-log-time { color: #7d8794; } .maomao-log-source { color: #8fb3ff; } .maomao-log-detail { color: #aab4c0; }
+      .maomao-log-level { display: inline-block; min-width: 2.5em; font-weight: 600; }
+      .maomao-log-error .maomao-log-level { color: #ff7a72; } .maomao-log-warn .maomao-log-level { color: #f0b45a; }
+      .maomao-log-info .maomao-log-level { color: #7fd18b; } .maomao-log-debug .maomao-log-level { color: #8fb3ff; } .maomao-log-trace .maomao-log-level { color: #b49cf0; }
       .maomao-sticker-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr)); gap:12px; }
       .maomao-sticker { display:grid; gap:6px; align-content:start; border:1px solid var(--dsw-alias-border-default,rgba(127,127,127,.25)); border-radius:12px; padding:10px; overflow-wrap:anywhere; }
       .maomao-sticker img, .maomao-sticker-missing { width:100%; aspect-ratio:1; object-fit:contain; border-radius:8px; background:var(--maomao-tint); }
@@ -556,10 +564,12 @@ window.__ModuleLoader__.load({
         h('p', { style: { margin: 0 } }, '模型会参考同群上下文和已启用的 QQ 普通记忆，判断是否接群里的话。'),
         h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.enabled,
           disabled: busy, onChange: (event) => update('enabled', event.target.checked) }), '启用群互动'),
-        h('label', { style: lineStyle }, '本机器人每轮话题最多续聊几次',
+        h('label', { style: lineStyle }, '多人一起聊时，和其他机器人最多接几轮',
           h('select', { value: value.maxRounds, style: draft ? unsavedStyle : inputStyle, disabled: busy,
             onChange: (event) => update('maxRounds', Number(event.target.value)) },
           [1, 2, 3, 4, 5].map((n) => h('option', { key: n, value: n }, n)))),
+        // The two-round cap for a single human audience is fixed in code; say so next to the setting.
+        h('p', { style: mutedStyle }, `只有一个人在看两个机器人斗嘴时，固定最多接 ${Math.min(2, value.maxRounds)} 轮；最近 5 分钟有至少两个人说话时，才按这里的 ${value.maxRounds} 轮。`),
         h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.paused,
           disabled: busy, onChange: (event) => update('paused', event.target.checked) }), '暂停互动'),
         h('p', { style: { margin: 0 } }, '群友可用 /停止互动 立即暂停。群主人可用 /恢复互动，或在这里取消暂停。'),
@@ -709,7 +719,7 @@ window.__ModuleLoader__.load({
             : previewLabels[result.reason] ?? '暂不满足发送条件。'));
     }
 
-    const mediaProviders = { google: 'Google', openai: 'OpenAI', openrouter: 'OpenRouter' };
+    const mediaProviders = { dsh: 'DSH 已配置的模型', google: 'Google', openai: 'OpenAI', openrouter: 'OpenRouter' };
 
     function ChatModels({ invoke, drafts }) {
       const [catalog, setCatalog] = useState(null);
@@ -784,7 +794,10 @@ window.__ModuleLoader__.load({
       credential_rejected: '服务拒绝了当前凭据，请换一个有效的 API Key。', rate_limit: '服务暂时限流，请稍后重试。' };
 
     function MediaModelCard({ entry, voices, invoke, onChange, drafts }) {
-      const { role, groups, saved } = entry;
+      const { role, saved } = entry;
+      // Vision lists DSH-routed models (including "follow the chat model") ahead of the direct provider presets.
+      const groups = entry.dshModels?.length ? [{ provider: 'dsh', models: entry.dshModels }, ...entry.groups] : entry.groups;
+      const label = (provider, model) => (provider === 'dsh' && entry.labels?.[model]) || model;
       const [persisted, setPersisted] = useState(() => {
         const provider = saved?.provider ?? groups.find((group) => group.models.includes(saved?.model))?.provider
           ?? (saved?.model?.match(/^(?:gpt-|chatgpt-image-)/i) ? 'openai' : groups[0].provider);
@@ -840,11 +853,17 @@ window.__ModuleLoader__.load({
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
         h('h3', { style: { margin: 0 } }, title),
         h('p', { style: { margin: 0 } }, mediaUse[role]),
+        role === 'vision' && entry.chatVision && h('div', { role: 'status', style: { display: 'grid', gap: 6 } },
+          entry.chatVision.sees
+            ? h('p', { style: { margin: 0 } }, `当前对话模型「${entry.chatVision.name}」可以直接看图，推荐选「跟随对话模型」：聊天里的图片直接交给它看，表情收藏也用它，不需要单独的识图模型和密钥。`)
+            : h('p', { style: { margin: 0 } }, `当前对话模型「${entry.chatVision.name || '未设置'}」不能看图，需要另选一个支持图片的识图模型。`),
+          entry.chatVision.sees && !(selection.provider === 'dsh' && selection.model === 'chat' && selection.enabled)
+            && h('div', null, button('使用推荐：跟随对话模型', () => { setManual(false); update({ provider: 'dsh', model: 'chat', enabled: true }); }, !!busy, 'primary'))),
         h('div', { style: lineStyle },
           manual ? h(ReactFragment, null,
             h('select', { 'aria-label': `${title}服务商`, style: inputStyle, value: selection.provider, disabled: !!busy,
               onChange: (event) => update({ provider: event.target.value, model: '' }) },
-            groups.map(({ provider }) => h('option', { key: provider, value: provider }, mediaProviders[provider]))),
+            groups.filter(({ provider }) => provider !== 'dsh').map(({ provider }) => h('option', { key: provider, value: provider }, mediaProviders[provider]))),
             h('input', { 'aria-label': `${title} ID`, style: inputStyle, value: selection.model, maxLength: 135,
               placeholder: '填写官方模型 ID', disabled: !!busy,
               onChange: (event) => update({ model: event.target.value }) }))
@@ -855,7 +874,7 @@ window.__ModuleLoader__.load({
                 update({ provider, model });
               } },
             options.map(({ provider, models }) => h('optgroup', { key: provider, label: mediaProviders[provider] },
-              models.map((model) => h('option', { key: model, value: JSON.stringify([provider, model]) }, model))))),
+              models.map((model) => h('option', { key: model, value: JSON.stringify([provider, model]) }, label(provider, model)))))),
           role === 'voice' && h('select', { 'aria-label': '语音音色', style: inputStyle, value: voice, disabled: !!busy,
             onChange: (event) => update({ voice: event.target.value }) },
           voices.map((value) => h('option', { key: value, value }, value))),
@@ -996,34 +1015,38 @@ window.__ModuleLoader__.load({
           value?.status === 'running' && button('取消重建', () => command('cancel'), busy)));
     }
 
-    const preferenceMessages = { saved: '已保存。', invalid: '请检查设置后重试。',
+    const preferenceMessages = { saved: '已保存。', invalid: '请检查设置后重试。', needs_consent: '定时发送需要先勾选「我确认允许猫猫向所选私聊主动发消息」。',
       unavailable: '对应的渠道插件未加载。', destination_missing: '目标已不可用，请重新选择已验证的私聊。',
       save_failed: '保存失败，原设置仍保留。' };
 
     function PreferenceCard({ title, section, initial, invoke, onChange, children, drafts }) {
       const [persisted, setPersisted] = useState(initial);
       const [draft, setDraft, clearDraft] = useDraft(drafts, `memory:${section}`);
-      const [sendConfirmed, setSendConfirmed] = useState(false);
+      const [sendConfirmed, setSendConfirmed] = useState(initial.sendConfirmed === true);
       const [state, setState] = useState('');
       const value = { ...persisted, ...draft, ...(section === 'sharing' ? { sendConfirmed } : {}) };
+      // The consent belongs to one recipient: it stays for the saved one and is asked again for a new one.
+      const confirmedFor = (next) => persisted.sendConfirmed === true && next.mode === persisted.mode && next.target === persisted.target;
       const set = (key, next) => {
         if (key === 'sendConfirmed') setSendConfirmed(next);
         else {
           const changes = { ...draft, [key]: next };
           if (next === persisted[key]) delete changes[key];
           setDraft(Object.keys(changes).length ? changes : undefined);
-          if (key === 'target' || key === 'mode') setSendConfirmed(false);
+          if (key === 'target' || key === 'mode') setSendConfirmed(confirmedFor({ ...persisted, ...changes }));
         }
         setState('');
       };
+      const consentChanged = section === 'sharing' && sendConfirmed !== (persisted.sendConfirmed === true);
+      const dirty = draft !== undefined || consentChanged;
       async function save() {
+        if (section === 'sharing' && value.mode === 'send' && !sendConfirmed) { setState('needs_consent'); return; }
         setState('saving');
         try {
           const result = await invoke('memorySettings', { request: { action: 'save', section, value } });
           setState(result.status);
           if (result.status === 'saved') {
-            setPersisted(value);
-            setSendConfirmed(false);
+            setPersisted({ ...value, sendConfirmed: section === 'sharing' && value.mode === 'send' && sendConfirmed });
             clearDraft();
             onChange();
           }
@@ -1032,7 +1055,7 @@ window.__ModuleLoader__.load({
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
         h('h3', { style: { margin: 0 } }, title),
         children(value, set, state === 'saving'),
-        saveControl(`保存${title}`, save, !initial.available || state === 'saving' || !draft, draft !== undefined),
+        saveControl(`保存${title}`, save, !initial.available || state === 'saving' || !dirty, dirty),
         state && h('p', { role: 'status', style: { margin: 0 } },
           state === 'saving' ? '正在保存…' : preferenceMessages[state]));
     }
@@ -1205,6 +1228,30 @@ window.__ModuleLoader__.load({
     }
 
     const memoryKinds = { preference: '偏好', project: '项目', historical_note: '旧资料' };
+    // Says in plain words where a group @ stops: platform delivery, bot identity, or owner / panel state.
+    const groupReasons = {
+      addressed: '收到了 @ 猫猫的群消息。', not_addressed: '收到了群消息，但没有 @ 猫猫，所以不回应。',
+      bot_unidentified: '收到了群消息，但 Bot 不知道自己的身份，没法判断是不是在 @ 它。',
+      owner_unknown: '收到了 @，但这个群还没开启：发消息的人不是已绑定的主人。请主人先在群里 @ 猫猫一次（主人要先和猫猫私聊过）。',
+      disabled: '这个群在面板里关闭了。', groups_off: '群聊功能在配置里被关闭了。', command: '以 / 开头的命令在群里不会回应。',
+      accepted: '最近一次 @ 已交给猫猫回复。',
+    };
+    function GroupCheck({ platform, check }) {
+      const lines = [];
+      if (platform === 'telegram') lines.push(check.readAll === true ? ['ok', '隐私模式已关闭，群里的 @ 能收到。']
+        : check.readAll === false ? ['warn', '隐私模式还开着：群里普通的 @猫猫 收不到，只有回复猫猫的消息能到。按上面的步骤关闭后，把 Bot 移出群再拉回来。']
+          : ['wait', 'Bot 还没连上，暂时无法检查隐私模式。']);
+      if (platform === 'feishu') lines.push(check.identified === true ? ['ok', '已识别 Bot 自己的身份，能分辨群里的 @。']
+        : check.identified === false ? ['warn', '没能读取 Bot 自己的 open_id，群里的 @ 无法识别。请检查应用凭据后重新连接。']
+          : ['wait', 'Bot 还没连上。']);
+      lines.push(check.last ? [check.last.reason === 'addressed' ? 'ok' : 'warn', `${groupReasons[check.last.reason] ?? check.last.reason}（${timestamp(check.last.at)}）`]
+        : ['warn', platform === 'feishu' ? '自 DSH 启动以来没收到任何飞书群消息：请确认 Bot 在群里、权限和事件订阅已开通并发布。'
+          : '自 DSH 启动以来没收到任何 Telegram 群消息。']);
+      if (check.accept) lines.push([check.accept.reason === 'accepted' ? 'ok' : 'warn', `${groupReasons[check.accept.reason] ?? check.accept.reason}（${timestamp(check.accept.at)}）`]);
+      return h('div', { role: 'status', style: { display: 'grid', gap: 4 } }, h('strong', null, '检查'),
+        ...lines.map(([state, text], index) => h('span', { key: index, className: `maomao-status ${state === 'ok' ? 'ready' : state === 'warn' ? 'waiting' : ''}` }, text)));
+    }
+
     // Lark / Telegram groups. They switch on when the owner first @-mentions the cat there.
     function PrivateGroups({ invoke, platform }) {
       const [value, setValue] = useState(null);
@@ -1232,8 +1279,9 @@ window.__ModuleLoader__.load({
         h('h3', { style: { margin: 0 } }, '群聊'),
         h('p', { style: mutedStyle }, `把 Bot 拉进${destinations[platform]}群后，由已绑定的主人在群里 @猫猫 一次，这个群就会开启。之后群里任何人 @ 或回复猫猫，她都会接话。`
           + '群聊有独立的记忆和表情库，不会用到主人的私聊记忆，也不会收到主动分享。'),
-        platform === 'telegram' && h('p', { style: mutedStyle }, 'Telegram 默认的隐私模式下，Bot 只看得到 @ 它或回复它的消息，这正是猫猫需要的，不用改。'),
-        platform === 'feishu' && h('p', { style: mutedStyle }, '飞书应用需要「获取群组中 @ 机器人的消息」权限（im:message.group_at_msg:readonly），并在发布新版本后生效。'),
+        platform === 'telegram' && h('p', { style: mutedStyle }, 'Telegram 默认开着隐私模式，这时群里普通的 @猫猫 根本不会转给 Bot。需要在 @BotFather 发 /setprivacy → 选这个 Bot → Disable，然后把 Bot 移出群再重新拉进来。猫猫仍然只回应 @ 她或回复她的消息。'),
+        platform === 'feishu' && h('p', { style: mutedStyle }, '飞书应用需要开通「获取群组中所有 @ 机器人的消息」权限（im:message.group_at_msg:readonly），事件订阅里要有「接收消息」（im.message.receive_v1），改完后发布新版本才生效。'),
+        value?.status === 'ok' && value.checks?.[platform] && h(GroupCheck, { platform, check: value.checks[platform] }),
         !value && h('p', { role: 'status', style: mutedStyle }, '正在读取…'),
         value?.status === 'failed' && h('p', { role: 'alert' }, '读取群聊列表失败。'),
         value?.status === 'ok' && value.enabled === false && h('p', { role: 'status' }, '群聊功能在配置里被关闭了（groups.enabled: false）。'),
@@ -1326,82 +1374,6 @@ window.__ModuleLoader__.load({
     }
 
     const memoryStates = { active: '有效', expired: '已过期', superseded: '已更新', archived: '已归档', forgotten: '已遗忘' };
-
-    function MemoryView({ invoke, revision }) {
-      const [sources, setSources] = useState(null);
-      const [sourceError, setSourceError] = useState(false);
-      const [draft, setDraft] = useState('');
-      const [filters, setFilters] = useState({ sourceId: '', query: '', kind: '', page: 0 });
-      const [result, setResult] = useState(null);
-      const key = JSON.stringify(filters);
-      const data = result?.key === key && result.revision === revision ? result.data : null;
-
-      useEffect(() => {
-        const cancel = new AbortController();
-        setSourceError(false);
-        invoke('memoryView', { request: { action: 'list' } }, cancel.signal).then(({ sources: values }) => {
-          if (cancel.signal.aborted) return;
-          setSources(values);
-          setFilters((previous) => values.some(({ id }) => id === previous.sourceId) ? previous
-            : { ...previous, sourceId: values[0]?.id ?? '', page: 0 });
-        }).catch(() => { if (!cancel.signal.aborted) setSourceError(true); });
-        return () => cancel.abort();
-      }, [invoke, revision]);
-
-      useEffect(() => {
-        if (!filters.sourceId) return;
-        const cancel = new AbortController();
-        const record = (value) => { if (!cancel.signal.aborted) setResult({ key, revision, data: value }); };
-        invoke('memoryView', { request: { action: 'read', ...filters } }, cancel.signal)
-          .then(record).catch(() => record({ status: 'failed' }));
-        return () => cancel.abort();
-      }, [filters, invoke, key, revision]);
-
-      const change = (value) => setFilters((previous) => ({ ...previous, page: 0, ...value }));
-      const selected = sources?.find(({ id }) => id === filters.sourceId);
-      return h('section', { style: { ...sectionStyle, display: 'grid', gap: 12, fontSize: type.body } },
-        h('h3', { style: { margin: 0 } }, '猫猫记住了什么'),
-        h('p', { style: { margin: 0 } }, '按桌面会话、私聊主人或 QQ 群查看已保存的记忆。'),
-        sourceError && h('p', { role: 'alert', style: { margin: 0 } }, '记忆范围读取失败，请刷新。'),
-        !sourceError && !sources && h('p', { role: 'status', style: { margin: 0 } }, '正在读取记忆范围…'),
-        sources?.length === 0 && h('p', { style: { margin: 0 } }, '还没有可查看的记忆范围。先到「渠道与会话」绑定私聊或 QQ 群。'),
-        selected && h('form', { style: lineStyle, onSubmit: (event) => { event.preventDefault(); change({ query: draft.trim() }); } },
-          h('select', { style: inputStyle, 'aria-label': '记忆范围', value: filters.sourceId,
-            onChange: (event) => change({ sourceId: event.target.value }) },
-          sources.map(({ id, label, platforms }) => h('option', { key: id, value: id },
-            `${label} · ${platforms.map((item) => destinations[item]).join(' + ')}`))),
-          h('select', { style: inputStyle, 'aria-label': '记忆类型', value: filters.kind,
-            onChange: (event) => change({ kind: event.target.value }) },
-          h('option', { value: '' }, '全部类型'),
-          ...Object.entries(memoryKinds).map(([value, label]) => h('option', { key: value, value }, label))),
-          h('input', { type: 'search', style: inputStyle, 'aria-label': '搜索记忆', placeholder: '搜索内容或摘录', maxLength: 100,
-            value: draft, onChange: (event) => setDraft(event.target.value) }),
-          h('button', { type: 'submit', style: inputStyle }, '搜索'),
-          filters.query && button('清除搜索', () => { setDraft(''); change({ query: '' }); })),
-        selected && !data && h('p', { role: 'status', style: { margin: 0 } }, '正在读取记忆…'),
-        data?.status === 'unavailable' && h('p', { role: 'status', style: { margin: 0 } }, '此范围已不可用，请刷新。'),
-        data && !['ok', 'unavailable'].includes(data.status) && h('p', { role: 'alert', style: { margin: 0 } }, '记忆读取失败，请刷新后重试。'),
-        data?.status === 'ok' && Number.isInteger(data.recentTurns)
-          && h('p', { style: { margin: 0 } }, `近七天在本群记录了 ${data.recentTurns} 条消息。下方列出从本群聊天中保存的记忆。`),
-        data?.status === 'ok' && h('p', { role: 'status', style: { margin: 0 } }, data.total
-          ? `${data.total} 条记忆` : filters.query || filters.kind ? '没有匹配的记忆。'
-            : selected?.platforms.includes('qq')
-              ? '本群还没有长期记忆。可以在群里 @猫猫 说「我喜欢拍鸟」，再回来刷新。'
-              : '这个范围还没有保存的记忆。可以在对应会话里说一句明确的偏好，再回来刷新。'),
-        ...((data?.items ?? []).map((item) => h('article', { key: item.id, style: { ...sectionStyle, display: 'grid', gap: 6, overflowWrap: 'anywhere' } },
-          h('div', { style: { ...lineStyle, opacity: 0.8 } }, memoryKinds[item.kind] ?? item.kind, '·',
-            memoryStates[item.status] ?? item.status, item.speaker && `· 群成员 ${item.speaker}`),
-          h('strong', null, item.statement || item.title),
-          item.title && item.title !== item.statement && h('span', { style: { opacity: 0.75 } }, `主题：${item.title}`),
-          item.quote && item.quote !== item.statement && h('details', null, h('summary', null, '来源摘录'),
-            h('p', { style: { margin: '5px 0 0' } }, item.quote)),
-          h('div', { style: { ...lineStyle, opacity: 0.7 } }, `更新 ${timestamp(item.updated)}`,
-            item.expires && `· 到期 ${timestamp(item.expires)}`)))),
-        data?.status === 'ok' && (filters.page > 0 || data.total > data.pageSize) && h('div', { style: lineStyle },
-          button('上一页', () => change({ page: filters.page - 1 }), filters.page === 0),
-          h('span', null, `第 ${filters.page + 1} 页`),
-          button('下一页', () => change({ page: filters.page + 1 }), (filters.page + 1) * data.pageSize >= data.total)));
-    }
 
     function PersonaSettings({ invoke, revision, drafts, section }) {
       const [data, setData] = useState(null);
@@ -1607,11 +1579,10 @@ window.__ModuleLoader__.load({
                 onChange: modelTab => go({ modelTab }), dirty: id => draftKeys.some(key => key === `models:${id}` || key.startsWith(`models:${id}:`)) }),
               modelTab === 'chat' ? h(ChatModels, { invoke, drafts }) : modelTab === 'web' ? h(WebSettings, { invoke, drafts }) : h(MediaModels, { invoke, onChange, drafts, selected: modelTab })),
             view === 'memory' && h(ReactFragment, null,
-              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['learning', '自主学习'], ['stickers', '表情库'], ['library', '原有记忆'], ['settings', '范围与共享'], ['index', '向量索引']],
+              h(Subnav, { label: '记忆管理', value: memoryTab, options: [['learning', '自主学习'], ['stickers', '表情库'], ['settings', '范围与共享'], ['index', '向量索引']],
                 onChange: memoryTab => go({ memoryTab }), dirty: id => draftKeys.some(key => key.startsWith('memory:') && draftDestination(key).memoryTab === id) }),
               memoryTab === 'learning' && h(LearningView, { invoke, drafts }),
               memoryTab === 'stickers' && h(StickerLibrary, { invoke }),
-              memoryTab === 'library' && h(MemoryView, { invoke, revision }),
               memoryTab === 'settings' && h(ReactFragment, null,
                 h(StatusCard, { title: '当前记忆范围', rows: [['私聊普通记忆', enabled(snapshot.memory.private)],
                   ['Lark / 飞书与 Telegram 共享', sharedMemoryStates[snapshot.memory.sharedState] ?? enabled(snapshot.memory.shared)],
@@ -1635,19 +1606,128 @@ window.__ModuleLoader__.load({
                   h(MemorySettings, { invoke, onChange, drafts, section: 'sharing' }),
                   h(SharePreview, { invoke }))),
             view === 'diagnostics' && h(ReactFragment, null,
-              h(Subnav, { label: '诊断渠道', value: diagnosticPlatform, options: platforms.map(key => [key, destinations[key]]),
+              h(Subnav, { label: '诊断渠道', value: diagnosticPlatform, options: [...platforms.map(key => [key, destinations[key]]), ['api', 'API 报错'], ['terminal', '终端']],
                 onChange: diagnosticPlatform => go({ diagnosticPlatform }) }),
-              h(StatusCard, { title: `${destinations[diagnosticPlatform]} 最近处理`, rows: [
+              diagnosticPlatform === 'terminal' && h(LogTerminal, { invoke }),
+              diagnosticPlatform === 'api' && h(ApiErrors, { invoke }),
+              platforms.includes(diagnosticPlatform) && h(StatusCard, { title: `${destinations[diagnosticPlatform]} 最近处理`, rows: [
                 ['渠道状态', states[snapshot.channels[diagnosticPlatform]]],
                 ...Object.entries({ receive: '收件', model: '对话模型', reply: '投递' }).map(([kind, name]) => {
                   const event = snapshot.diagnostics?.[diagnosticPlatform]?.[kind];
                   return [name, event ? `${{ ok: '成功', empty: '未返回文本', failed: '失败' }[event.outcome]} · ${timestamp(event.at)}` : '暂无记录'];
                 }),
+                ...(diagnosticPlatform === 'qq' ? [['格式消息', snapshot.formats?.qq
+                  ? `QQ 拒绝了${snapshot.formats.qq.keyboard ? '按钮卡片' : 'Markdown'}${snapshot.formats.qq.code ? `（代码 ${snapshot.formats.qq.code}）` : ''}，已改发纯文字 · ${timestamp(snapshot.formats.qq.at)}`
+                  : '暂无被拒记录']] : []),
                 ['媒体下载', snapshot.media[diagnosticPlatform] ? `${mediaLabels[snapshot.media[diagnosticPlatform].outcome]} · ${timestamp(snapshot.media[diagnosticPlatform].at)}` : '暂无记录'],
               ] }),
-              h('div', { style: lineStyle }, button('检查渠道连接', () => { setRelink(null); go({ view: 'channels', platform: diagnosticPlatform, channelTab: 'connection' }); }),
+              platforms.includes(diagnosticPlatform) && h('div', { style: lineStyle }, button('检查渠道连接', () => { setRelink(null); go({ view: 'channels', platform: diagnosticPlatform, channelTab: 'connection' }); }),
                 button('验证聊天回复', () => { setRelink(null); go({ view: 'channels', platform: diagnosticPlatform, channelTab: 'test' }); }),
                 button('检查对话模型', openModels))))));
+    }
+
+    // 诊断 → 终端 / API 报错. The terminal polls the rolling log of this run; API errors are kept for 90 days.
+    const logLevels = [['error', '错误'], ['warn', '警告'], ['info', '信息'], ['debug', '调试'], ['trace', '追踪']];
+    const logLevelName = Object.fromEntries(logLevels);
+    const clockTime = (at) => new Date(at).toLocaleTimeString('zh-CN', { hour12: false }) + '.' + String(at % 1000).padStart(3, '0');
+    function LogTerminal({ invoke }) {
+      const [filters, setFilters] = useState({ level: 'debug', source: '', query: '' });
+      const [query, setQuery] = useState('');
+      const [rows, setRows] = useState([]);
+      const [meta, setMeta] = useState(null);
+      const [paused, setPaused] = useState(false);
+      const [follow, setFollow] = useState(true);
+      const [notice, setNotice] = useState('');
+      const box = useRef(null);
+      const after = useRef(0);
+      useEffect(() => { after.current = 0; setRows([]); }, [filters]);
+      useEffect(() => {
+        if (paused) return;
+        let stopped = false;
+        const tick = async () => {
+          try {
+            const value = await invoke('diagnosticLogs', { request: { action: 'read', after: after.current, ...filters } });
+            if (stopped || value?.status !== 'ok') return;
+            setMeta({ level: value.level, startedAt: value.startedAt, sources: value.sources });
+            if (value.rows.length) {
+              after.current = value.rows.at(-1).id;
+              setRows((previous) => [...previous, ...value.rows].slice(-1000));
+            }
+          } catch { if (!stopped) setNotice('读取日志失败，稍后自动重试。'); }
+        };
+        void tick();
+        const timer = setInterval(tick, 2000);
+        return () => { stopped = true; clearInterval(timer); };
+      }, [invoke, filters, paused]);
+      useEffect(() => { if (follow && box.current) box.current.scrollTop = box.current.scrollHeight; }, [rows, follow]);
+      async function setLevel(level) {
+        const value = await invoke('diagnosticLogs', { request: { action: 'level', level } }).catch(() => null);
+        setNotice(value?.status === 'saved' ? `已改为记录到「${logLevelName[level]}」级别。` : '修改失败。');
+        if (value?.level) setMeta((previous) => ({ ...previous, level: value.level }));
+      }
+      return h('section', { style: { ...sectionStyle, ...stackStyle } },
+        h('h3', { style: { margin: 0 } }, '终端'),
+        h('p', { style: mutedStyle }, '实时查看猫猫这次运行的调试日志：每轮对话、工具调用（记忆、技能、表情、联网、生图、语音）、接话判断、后台总结和平台报错。'
+          + '只保存本次启动后的最近 24 小时，重启 DSH 后清空；密钥会被遮盖。'),
+        h('div', { style: lineStyle },
+          h('label', { style: lineStyle }, '显示',
+            h('select', { style: inputStyle, value: filters.level, onChange: (event) => setFilters({ ...filters, level: event.target.value }) },
+              logLevels.map(([id, name]) => h('option', { key: id, value: id }, `${name}及以上`)))),
+          h('label', { style: lineStyle }, '来源',
+            h('select', { style: inputStyle, value: filters.source, onChange: (event) => setFilters({ ...filters, source: event.target.value }) },
+              h('option', { value: '' }, '全部'), (meta?.sources ?? []).map((source) => h('option', { key: source, value: source }, source)))),
+          h('form', { style: lineStyle, onSubmit: (event) => { event.preventDefault(); setFilters({ ...filters, query: query.trim() }); } },
+            h('input', { type: 'search', style: inputStyle, value: query, maxLength: 100, placeholder: '关键字', 'aria-label': '日志关键字',
+              onChange: (event) => setQuery(event.target.value) }),
+            h('button', { type: 'submit', style: inputStyle }, '筛选')),
+          button(paused ? '继续' : '暂停', () => setPaused(!paused)),
+          button('清屏', () => setRows([])),
+          h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: follow, onChange: (event) => setFollow(event.target.checked) }), '自动滚到底部')),
+        h('div', { ref: box, className: 'maomao-terminal', role: 'log', 'aria-live': 'off', 'aria-label': '调试日志' },
+          rows.length ? rows.map((row) => h('div', { key: row.id, className: `maomao-log maomao-log-${row.level}` },
+            h('span', { className: 'maomao-log-time' }, clockTime(row.at)), ' ',
+            h('span', { className: 'maomao-log-level' }, logLevelName[row.level] ?? row.level), ' ',
+            h('span', { className: 'maomao-log-source' }, `[${row.source}]`), ' ', row.event,
+            row.detail && row.detail !== '""' && (row.detail.length > 160
+              ? h('details', null, h('summary', null, row.detail.slice(0, 160) + '…'), h('pre', null, row.detail))
+              : h('span', { className: 'maomao-log-detail' }, ' ', row.detail))))
+            : h('div', { className: 'maomao-log' }, paused ? '已暂停。' : '等待日志…')),
+        h('div', { style: lineStyle },
+          h('label', { style: lineStyle }, '记录级别',
+            h('select', { style: inputStyle, value: meta?.level ?? 'debug', onChange: (event) => setLevel(event.target.value) },
+              logLevels.map(([id, name]) => h('option', { key: id, value: id }, name)))),
+          h('span', { style: { ...mutedStyle, fontSize: type.caption } }, '调试会记录工具参数和结果；追踪最详细。API 报错不受这里影响，始终保存。')),
+        meta?.startedAt && h('p', { style: { ...mutedStyle, fontSize: type.caption } }, `本次启动于 ${timestamp(meta.startedAt)}`),
+        notice && h('p', { role: 'status', style: { margin: 0 } }, notice));
+    }
+
+    function ApiErrors({ invoke }) {
+      const [rows, setRows] = useState(null);
+      const [confirm, setConfirm] = useState(false);
+      const [refresh, setRefresh] = useState(0);
+      useEffect(() => {
+        const cancel = new AbortController();
+        invoke('diagnosticLogs', { request: { action: 'api' } }, cancel.signal).then((value) => {
+          if (!cancel.signal.aborted) setRows(value?.rows ?? []);
+        }).catch(() => { if (!cancel.signal.aborted) setRows([]); });
+        return () => cancel.abort();
+      }, [invoke, refresh]);
+      async function clear() {
+        await invoke('diagnosticLogs', { request: { action: 'clear_api' } }).catch(() => null);
+        setConfirm(false); setRefresh((n) => n + 1);
+      }
+      return h('section', { style: { ...sectionStyle, ...stackStyle } },
+        h('h3', { style: { margin: 0 } }, 'API 报错'),
+        h('p', { style: mutedStyle }, '平台和模型接口返回的错误会长期保存（最多 90 天、2000 条），方便事后查原因，例如 QQ 拒绝 Markdown、图片下载失败、Telegram / 飞书接口报错、模型调用失败。'),
+        h('div', { style: lineStyle }, button('刷新', () => setRefresh((n) => n + 1)),
+          confirm ? h(ReactFragment, null, button('确认清空', clear, false, 'confirmDestructive'), button('取消', () => setConfirm(false)))
+            : button('清空记录', () => setConfirm(true), !rows?.length, 'destructive')),
+        !rows ? h('p', { role: 'status', style: mutedStyle }, '正在读取…')
+          : !rows.length ? h('p', { style: { margin: 0 } }, '没有记录到 API 报错。')
+            : h('div', { className: 'maomao-terminal', style: { maxHeight: '50vh' } }, rows.map((row) => h('div', { key: row.id, className: 'maomao-log maomao-log-error' },
+              h('span', { className: 'maomao-log-time' }, timestamp(row.at)), ' ', h('span', { className: 'maomao-log-source' }, `[${row.source}]`), ' ',
+              h('strong', null, row.code), ' ', row.message,
+              row.detail && h('details', null, h('summary', null, '详情'), h('pre', null, row.detail))))));
     }
 
     function CatIcon({ size }) {

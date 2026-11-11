@@ -19,12 +19,13 @@ async function fixture(t, config = {}, ask) {
   const root = await mkdtemp(join(tmpdir(), 'maomao-dm-'));
   const file = join(root, 'state.json');
   const state = await new ConnectorState(file).load();
-  const sent = [], observed = [], model = [], emitted = [];
+  const sent = [], typing = [], observed = [], model = [], emitted = [];
   const handlers = new Map();
   let finish;
   const bot = { use() {}, on: (key, callback) => handlers.set(key, callback),
     start: () => new Promise(resolve => { finish = resolve; }), stop() { finish?.(); },
-    async send(value) { sent.push(value); return { id: `out-${sent.length}` }; } };
+    // Typing notices (msg_type 6) are not replies; keep them out of the reply count.
+    async send(value) { if (value.msgType === 6) { typing.push(value); return {}; } sent.push(value); return { id: `out-${sent.length}` }; } };
   const connector = new MaomaoQqConnector({ sessionController: {}, logger: {},
     emit: (_name, envelope) => emitted.push(envelope), get: () => undefined,
   }, { statePath: file, ordinary: { enabled: true }, ...config }, {
@@ -34,7 +35,7 @@ async function fixture(t, config = {}, ask) {
   });
   await connector.start(); handlers.get('ready')();
   t.after(async () => { await connector.stop(); await rm(root, { recursive: true, force: true }); });
-  return { connector, state, file, sent, observed, model, emitted };
+  return { connector, state, file, sent, typing, observed, model, emitted };
 }
 
 test('unpaired QQ private chat receives bounded onboarding and /sid without model or memory access', async t => {
@@ -68,6 +69,8 @@ test('stranger admission is persisted per bot, is not ownership, and never opens
   await until(() => f.sent.length === 2);
   assert.equal(f.model.length, 2);
   assert.deepEqual(f.observed.map(e => [e.scope, e.chatId, e.senderId]), [['c2c', 'user-a', 'user-a'], ['c2c', 'user-b', 'user-b']]);
+  // Each private reply is preceded by one QQ "typing…" notice tied to the inbound message.
+  assert.deepEqual(f.typing.map((v) => [v.target.scope, v.extra.input_notify.input_second]), [['c2c', 60], ['c2c', 60]]);
   assert.ok(f.model.every(([, options]) => !options.owner));
   assert.notEqual(f.model[0][1].profile.token, undefined);
   assert.equal(await f.connector.accept(group('blocked-group', '你好')), false);

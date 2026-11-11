@@ -1,4 +1,5 @@
 import { ApiClient } from '@tencent-connect/qqbot-nodejs/protocol';
+import { apiError } from '../debug-log.mjs';
 
 const id = (value) => typeof value === 'string' && /^[a-z0-9_-]{1,128}$/i.test(value);
 const text = (value, limit) => typeof value === 'string' ? value.trim().slice(0, limit) : '';
@@ -51,6 +52,7 @@ export class QqGroupTools {
       if (code !== 0) return this.#failure(entry, code, 0);
       return { status: 'ok', raw };
     } catch (error) {
+      apiError('qq-group', error?.bizCode ?? error?.httpStatus ?? 'error', `QQ 群资料查询失败（${operation}）`);
       return this.#failure(entry, Number(error?.bizCode), Number(error?.httpStatus));
     }
   }

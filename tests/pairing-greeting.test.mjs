@@ -17,7 +17,7 @@ async function until(check) {
 
 async function fixture(t, platform, { wait } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'maomao-pair-greeting-'));
-  const sent = [], prompts = [], mounted = [], memories = [], selected = [], sessions = new Map();
+  const sent = [], typing = [], prompts = [], mounted = [], memories = [], selected = [], sessions = new Map();
   let version = 'custom-v1', stopped;
   const ctx = {
     logger: {}, emit() {},
@@ -55,7 +55,7 @@ async function fixture(t, platform, { wait } = {}) {
     const handlers = new Map();
     const bot = { use() {}, on: (name, fn) => handlers.set(name, fn),
       start: () => new Promise(resolve => { stopped = resolve; }), stop: () => stopped?.(),
-      async send(value) { sent.push({ text: value.content, target: value.target }); return { id: `out-${sent.length}` }; } };
+      async send(value) { if (value.msgType === 6) { typing.push(value); return {}; } sent.push({ text: value.content, target: value.target }); return { id: `out-${sent.length}` }; } };
     connector = new MaomaoQqConnector(ctx, { statePath: join(root, 'qq.json'), ordinary: { enabled: true } }, {
       managedCredential: { appId: 'bot-test', secret: 'synthetic' }, botFactory: () => bot,
       ordinary: { async observe(e) { memories.push(e.text); }, async stop() {} },

@@ -2,6 +2,7 @@
 import { browserUrl } from './browser-network.mjs';
 import { randomUUID, createHash } from 'node:crypto';
 import { loadPublicImage, readPublicProject, projectRequest, pageResources } from './project-resources.mjs';
+import { apiError, log } from './debug-log.mjs';
 const statuses = ['ok', 'sent', 'unavailable', 'uncertain', 'cancelled', 'denied', 'limit', 'invalid'];
 // A rejected call says why, so the model can fix its arguments instead of reporting a permission problem.
 const invalid = (reason) => ({ status: 'invalid', reason });
@@ -76,6 +77,7 @@ export function openChatTools({ current, signal, image, voice, web, browser, has
         if (exec.agent?.id !== sessionId || !available() || exec.signal?.aborted) return result('denied');
         const checked = validate(args ?? {});
         if (checked !== true) {
+          log('info', 'tool', `${name} 参数被拒`, { args, checked });
           const { status, reason } = checked || invalid('参数不符合这个工具的要求，请对照参数说明修改后重试；这不是权限问题。');
           return result(status, JSON.stringify({ reason }));
         }
@@ -91,10 +93,12 @@ export function openChatTools({ current, signal, image, voice, web, browser, has
         } catch (error) {
           value = !available() || exec.signal?.aborted ? result('cancelled')
             : media ? result('unavailable') : webFailure(timer.aborted ? { code: 'WEB_TIMEOUT' } : error);
+          if (value.status !== 'cancelled') apiError(media ? 'media' : browsing ? 'browser' : 'web', error?.code ?? (timer.aborted ? 'WEB_TIMEOUT' : error?.name ?? 'error'), `${name} 调用失败`, error?.message);
         }
         if (!available() || exec.signal?.aborted) value = result('cancelled');
         if (browsing) browser.record?.(value?.status ?? 'unavailable');
         if (!statuses.includes(value?.status)) value = result('unavailable');
+        log(value.status === 'ok' || value.status === 'sent' ? 'debug' : 'info', 'tool', `${name} → ${value.status}`, { args, data: String(value.data ?? '').slice(0, 800) });
         if (media) outcomes.push({ name, status: value.status, ...(name === 'maomao_generate_image' ? { prompt: args.prompt, aspect_ratio: args.aspect_ratio,
           reference_source: references.get(args.reference_id)?.url, reference_sha256: references.get(args.reference_id)?.sha256 } : {}) });
         if (media) {

@@ -527,6 +527,7 @@ test('a Lark or Telegram group switches on when its owner @-mentions the cat, la
   const settle = async (count) => { const end = Date.now() + 2000; while (replies.length < count && Date.now() < end) await pause(20); };
   try {
     assert.equal(say('1', '3003', '猫猫在吗'), false, 'a stranger cannot switch a group on');
+    assert.equal(connector.groups().checks.telegram.accept.reason, 'owner_unknown', 'the panel can say why nothing happened');
     assert.equal(say('2', '1001', '猫猫来认识一下大家'), true, 'the owner switches it on');
     await settle(1);
     assert.equal(say('3', '3003', '你好呀'), true, 'now anyone who @-mentions the cat gets a reply');
@@ -540,5 +541,26 @@ test('a Lark or Telegram group switches on when its owner @-mentions the cat, la
     assert.deepEqual(listed.groups.map(({ label, status }) => [label, status]), [['猫猫测试群', 'enabled']]);
     assert.equal(connector.groups({ action: 'set', key: listed.groups[0].key, status: 'disabled' }).status, 'saved');
     assert.equal(say('4', '1001', '还在吗'), false, 'a group switched off in the panel stays off, even for the owner');
+    assert.equal(connector.groups().checks.telegram.accept.reason, 'disabled');
   } finally { await connector.stop(); }
+});
+
+test('the Telegram transport reports privacy mode from getMe and whether group messages address the bot', async () => {
+  const abort = new AbortController();
+  const date = Math.floor(Date.now() / 1000);
+  const group = { id: -100500, type: 'supergroup', title: '群' };
+  let polls = 0;
+  const transport = new TelegramTransport({ token: '2000:synthetic-token-value-abcdefghijk', botId: '2000', fetchImpl: async (url) => {
+    const method = String(url).split('/').pop();
+    const ok = (result) => Response.json({ ok: true, result });
+    if (method === 'getWebhookInfo') return ok({ url: '' });
+    if (method === 'getMe') return ok({ id: 2000, is_bot: true, username: 'maomaobot', can_read_all_group_messages: false });
+    polls += 1;
+    if (polls === 1) return ok([{ update_id: 1, message: { message_id: 7, date, chat: group, from: { id: 1001, is_bot: false }, text: '大家好' } }]);
+    abort.abort();
+    return ok([]);
+  } });
+  await transport.run(async () => {}, abort.signal).catch(() => undefined);
+  assert.equal(transport.groupCheck.readAll, false);
+  assert.equal(transport.groupCheck.last.reason, 'not_addressed');
 });

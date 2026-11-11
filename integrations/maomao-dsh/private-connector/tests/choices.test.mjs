@@ -22,6 +22,7 @@ test('dynamic choices are optional and a malformed control line never appears in
 });
 
 test('only the original private chat can consume a card once and continue the same model session', async (t) => {
+  const sections = [];
   const root = await mkdtemp(join(tmpdir(), 'maomao-card-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const endpoint = { platform: 'telegram', accountId: '2000', chatId: '1001', senderId: '1001' };
@@ -40,7 +41,8 @@ test('only the original private chat can consume a card once and continue the sa
     async projections() { return { values: { agentPreset: PRESET } }; },
     async resolveAgent() {
       return { agent: { ctx: { get: () => ({ getSectionOrder() {}, section({ text: system }) {
-        assert.match(system, /按本轮语境/);
+        if (!sections.length) assert.match(system, /聊天选项/);
+        sections.push(system);
         return () => {};
       } }) } } };
     },

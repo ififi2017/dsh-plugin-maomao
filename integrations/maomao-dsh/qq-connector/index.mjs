@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { setTimeout as wait } from 'node:timers/promises';
 import { typingPause } from '../pacing.mjs';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
+import { apiError, log } from '../debug-log.mjs';
 
 import { HarnessConversation } from './harness.mjs';
 import { QqGroupTools } from './group-tools.mjs';
@@ -23,7 +24,7 @@ import { OrdinaryBridge } from './ordinary.mjs';
 import { PassiveShadow } from './shadow.mjs';
 import { GeminiSpeech, spokenTranscript } from './speech.mjs';
 import { ConnectorState, qqStorageHome, routeKey } from './state.mjs';
-import { choiceData, parseChoiceData, parseChoiceReply } from '../choices.mjs';
+import { choiceData, parseChoiceData, parseChoiceReply, ChoiceThrottle } from '../choices.mjs';
 import { channelPersona } from '../personas.mjs';
 import { pairingGreeting } from '../pairing-greeting.mjs';
 import { ReplyCheck } from '../onboarding.mjs';
@@ -75,6 +76,7 @@ export class MaomaoQqConnector {
   #shadow;
   #groupTools = new QqGroupTools();
   #recentReplies = new Map();
+  #choiceThrottle = new ChoiceThrottle();
   #ordinary;
   #stickers = null;
   #mediaJobs = new Set();
@@ -314,7 +316,7 @@ export class MaomaoQqConnector {
         || this.#config.shadow.semantic.groupAllowlist.includes(chatId));
     const saved = this.#state.peerSettings(this.#appId, chatId);
     return { enabled: Boolean(this.#shadow && (saved?.enabled ?? (active && legacy))),
-      paused: saved?.paused === true, maxRounds: saved?.maxRounds ?? 3, waitMs: legacy?.waitMs };
+      paused: saved?.paused === true, maxRounds: saved?.maxRounds ?? 2, waitMs: legacy?.waitMs };
   }
 
   peerGroups() {
@@ -718,7 +720,8 @@ export class MaomaoQqConnector {
         ? this.#ctx.get?.('maomaoLearning')?.open({ namespace: 'qq', scope: qqMemoryScope(envelope),
           subject: envelope.senderId, owner: this.#isOwner(envelope),
           label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
-          text: envelope.text, sourceId: envelope.receiptKey, current, signal }) : null;
+          // An image-only turn still gets the memory tools, so the model never meets an unknown tool.
+          text: envelope.text || (images.length || stickerImages.length ? '[图片]' : ''), sourceId: envelope.receiptKey, current, signal }) : null;
       const learningService = this.#ctx.get?.('maomaoLearning');
       const stickerTools = !test && learningService?.settings.stickers === true && this.#config.stickers?.enabled !== false
         ? openStickerTools({ current: () => current() && learningService.settings.stickers === true, signal, images: stickerImages,
@@ -737,8 +740,12 @@ export class MaomaoQqConnector {
       const groupTools = !test && envelope.scope === 'group' ? this.#groupTools.open({
         bot: this.#bot, groupId: envelope.chatId, speakerId: peerTurn?.senderId ?? envelope.senderId, current,
       }) : null;
+      const chatKey = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
       const choices = !test && envelope.scope === 'group' && !passive
-        && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group');
+        && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group') && this.#choiceThrottle.allow(chatKey);
+      log('info', 'qq', `${envelope.scope === 'group' ? '群' : '私聊'}回合${peerTurn ? '（接机器人）' : passive ? '（主动接话）' : ''}`,
+        { chat: envelope.chatId.slice(-6), text: (peerTurn?.text ?? envelope.text).slice(0, 200), images: images.length, directVision, form: envelope.replyForm ?? peerTurn?.form ?? null, choices });
+      if (!test && !peerTurn && envelope.scope === 'c2c') void this.#typing(envelope);
       const reply = await this.#harness.ask(envelope, {
         images,
         imageDescription,
@@ -765,6 +772,7 @@ export class MaomaoQqConnector {
       }).catch((error) => {
         test?.('model_failed');
         this.#diagnostics.model = { outcome: 'failed', at: Date.now() };
+        apiError('qq-model', error?.code ?? error?.name ?? 'error', 'QQ 对话模型调用失败', errorLabel(error));
         throw error;
       });
       const { text: answer, options } = parseChoiceReply(reply ?? '');
@@ -787,7 +795,8 @@ export class MaomaoQqConnector {
       });
       test?.(sent.length ? 'sent' : 'delivery_failed');
       if (sent.length) {
-        const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
+        const key = chatKey;
+        this.#choiceThrottle.noteReply(key, Boolean(card));
         this.#recentReplies.set(key, [...(this.#recentReplies.get(key) ?? []), answer].slice(-8));
         if (this.#recentReplies.size > 200) this.#recentReplies.delete(this.#recentReplies.keys().next().value);
       }
@@ -979,6 +988,7 @@ export class MaomaoQqConnector {
         .catch((error) => {
           this.#mediaStatus = { outcome: error.code ?? (error.name === 'TimeoutError' ? 'timeout' : 'network'), at: Date.now() };
           this.#logger.warn?.('QQ image unavailable:', errorLabel(error));
+          apiError('qq-media', error.code ?? (error.name === 'TimeoutError' ? 'timeout' : 'network'), 'QQ 图片下载失败', errorLabel(error));
           return [];
         }).finally(() => this.#imageInFlight.delete(receiptKey));
       this.#imageInFlight.set(receiptKey, operation);
@@ -1034,6 +1044,16 @@ export class MaomaoQqConnector {
     return sent;
   }
 
+  // QQ shows "typing…" only in private chats (msg_type 6). It lasts 60 s and needs no stop call;
+  // a high msg_seq keeps it clear of the reply segments.
+  async #typing(envelope) {
+    const anchor = envelope.replyAnchor ?? envelope;
+    try {
+      await this.#bot?.send({ target: { scope: 'c2c', targetId: anchor.chatId, msgId: anchor.messageId }, msgType: 6,
+        extra: { msg_seq: 90, input_notify: { input_type: 1, input_second: 60 } } });
+    } catch (error) { this.#logger.debug?.('QQ typing notice failed', errorLabel(error)); log('debug', 'qq', '输入状态发送失败', errorLabel(error)); }
+  }
+
   async #sendText(envelope, content, seq, current = () => true, keyboard, choices) {
     const options = {
       target: { scope: envelope.scope, targetId: envelope.chatId, msgId: envelope.messageId },
@@ -1042,7 +1062,8 @@ export class MaomaoQqConnector {
     if (!current()) return '';
     this.#shadow?.noteOutbound(envelope, content);
     const plain = plainChatMarkdown(content);
-    const choiceText = choices ? '\n\n' + choices.map((label, index) => (index + 1) + '. ' + label).join('\n') + '\n可以直接回复你想选的方向。' : '';
+    // In a group, numbered options as plain text invite people to answer "4"; leave them out there.
+    const choiceText = choices && envelope.scope !== 'group' ? '\n\n' + choices.map((label, index) => (index + 1) + '. ' + label).join('\n') + '\n可以直接回复你想选的方向。' : '';
     if ((keyboard || hasChatMarkdown(content, plain)) && this.#config.markdownSupport !== false && !this.#markdownDenied.has(envelope.scope)) {
       try {
         const result = await this.#bot.send({ ...options, msgType: MsgType.MARKDOWN, markdown: { content: keyboard ? content : content + choiceText },
@@ -1053,7 +1074,9 @@ export class MaomaoQqConnector {
         const code = Number(error instanceof ApiError ? error.bizCode : 0);
         if (![40034012, 40034090].includes(code)) throw error;
         if (code === 40034012) this.#markdownDenied.add(envelope.scope);
-        this.#logger.info?.('QQ Markdown rejected, using plain text', code);
+        this.#diagnostics.format = { outcome: 'rejected', code, keyboard: Boolean(keyboard), at: Date.now() };
+        this.#logger.warn?.('QQ Markdown rejected, using plain text', code);
+        apiError('qq', code, keyboard ? 'QQ 拒绝了按钮卡片，改发纯文字' : 'QQ 拒绝了 Markdown，改发纯文字');
         if (!current()) return '';
       }
     }

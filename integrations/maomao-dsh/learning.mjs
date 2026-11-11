@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { LearningStore, learningKey, ordinaryLearningText } from './learning-store.mjs';
 import { publicUrl } from './chat-tools.mjs';
 import { completeText, parseJsonReply } from './model-call.mjs';
+import { log } from './debug-log.mjs';
 
 const memoryKinds = ['profile', 'episode', 'followup', 'diary', 'style', 'meme'];
 export const learningGuidance = `[记忆与学习] 你有自己的记忆。maomao_memory 记住、修正或忘掉和这个人有关的事，maomao_skill 保存和调用做事的方法。像人一样自己判断什么值得记，记的时候不用说出来。
@@ -78,7 +79,9 @@ export class LearningRuntime {
       const { total } = store.list({ active: true });
       const profile = store.list({ kind: 'profile', active: true }).items.filter(r => r.subject === actor).slice(0, 10);
       const recent = store.list({ active: true }).items.filter(r => !['followup', 'diary'].includes(r.kind) && !profile.some(p => p.id === r.id));
-      const rows = [...profile, ...recent].slice(0, 20).map(brief);
+      // Say whose memory each row is, so in a group the cat does not pin someone else's facts on the current speaker.
+      const rows = [...profile, ...recent].slice(0, 20).map(brief)
+        .map((row) => ({ ...row, subject: row.subject === actor ? '当前发言者' : '其他人' }));
       const hidden = total - rows.length;
       const { followups, diary } = recallFrom(store, actor);
       return `${withGuidance ? learningGuidance + '\n' : ''}[现在] ${clock()}\n`
@@ -137,8 +140,12 @@ export class LearningRuntime {
               render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
             execute: (args, exec) => {
               if (exec.agent?.id !== sessionId || exec.signal?.aborted || !available()) return { status: 'denied' };
-              try { const { status, ...data } = run(args, skill); return { status, data: JSON.stringify(data) }; }
-              catch { return { status: 'failed' }; }
+              try {
+                const { status, ...data } = run(args, skill);
+                log(status === 'ok' || status === 'saved' ? 'debug' : 'info', skill ? 'skill' : 'memory',
+                  `${skill ? 'maomao_skill' : 'maomao_memory'} ${args?.action} → ${status}`, { args, result: data });
+                return { status, data: JSON.stringify(data) };
+              } catch (error) { log('warn', skill ? 'skill' : 'memory', '记忆工具出错', error?.message); return { status: 'failed' }; }
             },
             }, { when: ({ agent }) => agent?.id === sessionId && available() }));
           }
@@ -214,7 +221,8 @@ export class LearningRuntime {
         for (const item of value.updates.slice(0, 3)) if (job.store.save(item, job.authority).status === 'saved') applied++;
       }
       job.store.reviewDone(job.source, applied ? 'learned' : value?.ordinary === true ? 'no_change' : 'skipped');
-    } catch { job.store.reviewDone(job.source, 'failed'); }
+      log(applied ? 'info' : 'debug', 'learning', `后台总结：保存 ${applied} 条`, { ordinary: value?.ordinary, updates: value?.updates });
+    } catch (error) { job.store.reviewDone(job.source, 'failed'); log('warn', 'learning', '后台总结失败', error?.message); }
     finally { this.active--; }
   }
   async reflect(input, signal) {

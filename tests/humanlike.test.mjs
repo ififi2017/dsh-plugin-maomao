@@ -51,3 +51,38 @@ test('the chat model gets images directly when it can see them', async () => {
   assert.equal(await chatSeesImages({ get() {} }, { provider: 'deepseek', model: 'chat' }), false);
   assert.equal(await chatSeesImages({ get() {} }, null), false);
 });
+
+test('choice options are offered again only after enough replies and time have passed', async () => {
+  const { ChoiceThrottle, choiceGuidance } = await import('../integrations/maomao-dsh/choices.mjs');
+  let now = 0;
+  const throttle = new ChoiceThrottle({ replies: 3, minutes: 10, clock: () => now });
+  assert.equal(throttle.allow('chat'), true);
+  throttle.noteReply('chat', true);
+  for (let i = 0; i < 3; i++) { assert.equal(throttle.allow('chat'), false); throttle.noteReply('chat'); }
+  assert.equal(throttle.allow('chat'), false, 'three replies but not ten minutes');
+  now = 10 * 60_000;
+  assert.equal(throttle.allow('chat'), true);
+  assert.equal(throttle.allow('other-chat'), true, 'chats are throttled separately');
+  assert.match(choiceGuidance, /极少使用/);
+});
+
+test('nudges separate emoji endings, kaomoji and stage directions', async () => {
+  const { styleNudge } = await import('../integrations/maomao-dsh/humanlike.mjs');
+  assert.match(styleNudge(['本喵登场！😼🔥', '网速就是猫步！😼🐾', '没收小鱼干哦！😼', '梦想总要有！😼✨']), /emoji/);
+  const kaomoji = styleNudge(['哇好可爱(ฅ´ω`ฅ)', '太软了吧(ฅ///ฅ)', '晚安啦(｡♥‿♥｡)', '嗯嗯']);
+  assert.match(kaomoji, /颜文字/); assert.doesNotMatch(kaomoji, /动作描写/);
+  assert.match(styleNudge(['（叼着小鱼干从天而降）登场', '（甩了甩尾巴）好吧', '正常说话']), /动作描写/);
+});
+
+test('no sticker candidates means no candidate line, and a stale memory version is handed back', async () => {
+  const { openStickerTools } = await import('../integrations/maomao-dsh/sticker-tools.mjs');
+  const empty = openStickerTools({ current: () => true, signal: AbortSignal.timeout(1000), images: [], operate: async () => ({}) });
+  assert.equal(empty.context({ guidance: false }), '');
+  const one = openStickerTools({ current: () => true, signal: AbortSignal.timeout(1000), images: [{ data: 'x' }], operate: async () => ({}) });
+  assert.match(one.context({ guidance: false }), /image-1/);
+  const { LearningStore } = await import('../integrations/maomao-dsh/learning-store.mjs');
+  const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const store = new LearningStore(mkdtempSync(join(tmpdir(), 'conflict-')), 'a'.repeat(64));
+  const saved = store.save({ kind: 'profile', title: 't', body: 'b' }, { subject: 's', owner: true, manual: true });
+  assert.deepEqual(store.change(saved.id, 99, 'forget', { subject: 's' }), { status: 'conflict', id: saved.id, version: 1 });
+});

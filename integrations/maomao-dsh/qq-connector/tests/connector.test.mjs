@@ -448,6 +448,7 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
         ? 'standard' : 'maomao-qq-ordinary' } }; },
       async state(request) { calls.push(['state', request]); return { cursor: 7 }; },
       async prompt(request) { calls.push(['prompt', request]); return { accepted: true }; },
+      async resolveAgent() { return { agent: { ctx: { get: (name) => name === 'systemPrompt' ? { getSectionOrder: () => 0, section: () => () => {} } : undefined } } }; },
       async wait(request) {
         calls.push(['wait', request]);
         return { reason: 'idle', output: { records: [{ event: {

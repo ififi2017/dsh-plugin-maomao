@@ -23,7 +23,6 @@
     "model-media.mjs",
     "web-settings.mjs",
     "memory-settings.mjs",
-    "memory-view.mjs",
     "client.js",
     "cordis.patch.yml",
     "README.md",
