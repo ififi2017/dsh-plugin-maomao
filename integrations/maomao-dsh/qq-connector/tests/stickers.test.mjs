@@ -110,3 +110,39 @@ test('isolated worker and connector collect twice, send one notice, then append 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('in sticker-tool mode a clear sticker is kept on first sight and announced with a short line when no turn mentions it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-steal-'));
+  const env = { ...Object.fromEntries(['MAOMAO_QQ_APP_ID', 'MAOMAO_QQ_APP_SECRET', 'MAOMAO_QQ_CONNECT']
+    .map((key) => [key, process.env[key]])) };
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
+    MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return { id: `sent-${sends.length}` }; } };
+  const stickers = { async describe() { return description; } };
+  const learning = { settings: { stickers: true, collectStickers: true } };
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: console,
+    get: (name) => name === 'maomaoLearning' ? learning : undefined },
+  { groupAllowlist: ['group-a'], statePath: join(root, 'state.json'), stickers: { enabled: true } },
+  { botFactory: () => bot, ordinary, stickers, stealNoticeDelayMs: 60, harness: { async ask() { return ''; } } });
+  connector.loadImages = async (receiptKey) => receiptKey.endsWith(':first') ? [picture] : [];
+  try {
+    await connector.start();
+    await connector.accept(message('first', { attachments }));
+    const end = Date.now() + 4000;
+    while (!sends.length && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(sends.length, 1);
+    assert.match(sends[0].content, /偷走啦.*憋笑脸/);
+    assert.equal(sends[0].target.msgId, 'first');
+  } finally {
+    await connector.stop();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

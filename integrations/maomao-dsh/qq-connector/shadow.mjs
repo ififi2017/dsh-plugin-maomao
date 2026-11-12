@@ -260,7 +260,7 @@ export class PassiveShadow {
       for (let attempt = 0; attempt <= MAX_PEER_RECHECKS; attempt++) {
         const latest = state.rows.findLast((row) => row.role === 'participant');
         if (!latest || !current()) return null;
-        turn = { speaker: latest.speaker, senderId: latest.senderId, text: latest.text };
+        turn = { speaker: latest.speaker, senderId: latest.senderId, text: latest.text, messageId: latest.messageId };
         const version = state.peerVersion;
         memory = await recall?.(anchor, turn.text);
         if (!current()) return null;

@@ -191,6 +191,9 @@ test('the model gets same-group memory, can continue without a name, and obeys t
     return { reply: payload.mode === 'peer_banter' };
   }, { async ask(_envelope, options) {
     if (!options.peerTurn) return '再叫杂鱼就嚼网线喵。';
+    // The human line the other bot is answering stays in view; only the bot's own line is the current turn.
+    assert.ok(options.ambient.some((row) => row.role === 'user' && row.text === '杂鱼猫猫'));
+    assert.ok(!options.ambient.some((row) => row.text === options.peerTurn.text));
     assert.deepEqual(options.ordinaryContext, memory);
     assert.equal(options.owner, false);
     return `回敬：${options.peerTurn.text}`;

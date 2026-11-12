@@ -22,6 +22,7 @@ import { styleNudge } from '../humanlike.mjs';
 import { setTimeout as pause } from 'node:timers/promises';
 import { openStickerTools } from '../sticker-tools.mjs';
 import { apiError, log } from '../debug-log.mjs';
+import { chatWorkspace } from '../chat-workspace.mjs';
 
 export const name = 'maomao-dsh-private';
 export const inject = ['sessionController'];
@@ -103,6 +104,7 @@ export class PrivateConnector {
   #choiceThrottle = new ChoiceThrottle();
   #groupOutcome = new Map();
   #config;
+  #chatFolder;
   #routes;
   #bindings;
   #ledger;
@@ -130,6 +132,7 @@ export class PrivateConnector {
   constructor(ctx, config, { routes, ledger, memory, contact, secrets } = {}) {
     this.#ctx = ctx;
     this.#config = config;
+    this.#chatFolder = chatWorkspace(ctx, { configured: config.workspace });
     this.#typingPace = config.typingPace !== false;
     this.#logger = typeof ctx.logger === 'function' ? ctx.logger(name) : (ctx.logger ?? console);
     this.#bindings = new PrivateBindings(config.bindings ?? []);
@@ -1069,8 +1072,12 @@ export class PrivateConnector {
   async #ask(route, messages, { ordinaryContext, profile, interactive, chatTools, stickerTools, learning, previousSpeech, signal }) {
     const controller = this.#ctx.sessionController;
     let sessionId = this.#ledger.session(route);
+    // A conversation from before the chat folder existed starts a fresh session there once.
+    if (sessionId && !await this.#chatFolder.holds(sessionId).catch(() => true)) sessionId = null;
     if (!sessionId) {
-      const result = await controller.create({ agentPreset: PRESET, ...(this.#config.workspace ? { cwd: this.#config.workspace } : {}) });
+      const cwd = await this.#chatFolder.folder();
+      const result = await controller.create({ agentPreset: PRESET, ...(cwd ? { cwd } : {}) });
+      await this.#chatFolder.attach(result.sessionId);
       sessionId = this.#ledger.bind(route, result.sessionId);
     }
     const projection = await controller.projections({ sessionId }, signal);

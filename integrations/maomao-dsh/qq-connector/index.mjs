@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
-import { chatSeesImages, chatSelection } from '../model-call.mjs';
+import { chatSeesImages, chatSelection, completeText } from '../model-call.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as wait } from 'node:timers/promises';
 import { typingPause } from '../pacing.mjs';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
@@ -12,7 +12,8 @@ import { QqGroupTools } from './group-tools.mjs';
 import { openChatTools } from '../chat-tools.mjs';
 import { openStickerTools } from '../sticker-tools.mjs';
 import { qqMemoryScope } from '../learning-store.mjs';
-import { HarnessShadowJudge } from './judge.mjs';
+import { HarnessShadowJudge, archiveJudgeSessions } from './judge.mjs';
+import { chatWorkspace } from '../chat-workspace.mjs';
 import { qqCommand, qqPersonaReply, sidReply, statusReply } from './commands.mjs';
 import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
 import { GeminiImageGeneration, OpenAiImageGeneration } from './image-generation.mjs';
@@ -72,6 +73,10 @@ export class MaomaoQqConnector {
   #lastError = '';
   #observed = new Map();
   #stickerOffered = new Set();
+  #steals = new Map();
+  #stealNoticeDelayMs = 15_000;
+  #dshHome = '';
+  #chatFolder;
   #imageInFlight = new Map();
   #queues = new Map();
   #shadow;
@@ -95,8 +100,9 @@ export class MaomaoQqConnector {
   #imageGeneration = null;
 
   constructor(ctx, config, { state, harness, shadowJudge, ordinary, stickers, speech, imageGeneration,
-    managedCredential, botFactory = (options) => new QQBot(options) } = {}) {
+    managedCredential, botFactory = (options) => new QQBot(options), stealNoticeDelayMs = 15_000 } = {}) {
     this.#ctx = ctx;
+    this.#stealNoticeDelayMs = stealNoticeDelayMs;
     this.#logger = typeof ctx.logger === 'function' ? ctx.logger(name) : (ctx.logger ?? console);
     this.#config = config;
     this.#managedCredential = managedCredential;
@@ -104,17 +110,15 @@ export class MaomaoQqConnector {
     const profileDocument = ctx.get?.('configEditor')?.documentPath;
     const root = qqStorageHome(home, profileDocument ? dirname(profileDocument) : process.env.DSH_PROFILE_DIR);
     this.#storageHome = root;
+    this.#dshHome = home;
     this.#state = state ?? new ConnectorState(resolve(config.statePath ?? join(root, 'integrations', 'maomao-qq', 'state.json')));
+    this.#chatFolder = chatWorkspace(ctx, { configured: config.workspace, home });
     this.#harness = harness ?? new HarnessConversation(ctx.sessionController, this.#state, {
-      workspace: config.workspace,
+      workspace: this.#chatFolder,
       agentPreset: config.agentPreset,
     });
     const semanticJudge = config.shadow?.enabled === true
-      ? new HarnessShadowJudge(ctx.sessionController, this.#state, {
-        preset: config.shadow.semantic?.preset,
-        workspace: config.workspace,
-        selectModel: (sessionId) => ctx.get?.('maomaoModels')?.useChat?.(ctx.sessionController, sessionId),
-      }) : null;
+      ? new HarnessShadowJudge((call) => completeText(ctx, { ...call, maxTokens: 1500 })) : null;
     this.#shadow = config.shadow?.enabled === true ? new PassiveShadow(
       resolve(config.shadow.path ?? join(root, 'integrations', 'maomao-qq', 'shadow-decisions.jsonl')),
       { isOwner: (envelope) => this.#isOwner(envelope),
@@ -175,6 +179,9 @@ export class MaomaoQqConnector {
 
   async #start() {
     await this.#state.load();
+    this.#runMediaJob(() => this.#archiveOldJudgeSessions());
+    this.#chatFolder.attachExisting().then((count) => log('info', 'plugin', '猫猫的聊天分组已就绪', { sessions: count }))
+      .then(() => this.#archiveOldChatSessions()).catch((error) => log('warn', 'plugin', '整理旧聊天会话失败', error?.message ?? String(error)));
     const appId = this.#managedCredential?.appId ?? process.env.MAOMAO_QQ_APP_ID?.trim();
     const appSecret = this.#managedCredential?.secret ?? process.env.MAOMAO_QQ_APP_SECRET?.trim();
     if (!appId || !appSecret) throw new Error('MAOMAO_QQ_APP_ID and MAOMAO_QQ_APP_SECRET are required');
@@ -608,8 +615,10 @@ export class MaomaoQqConnector {
         }
       }).catch((error) => this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error)));
     }
-    if (this.#stickers && this.#ctx.get?.('maomaoLearning')?.settings.stickers !== true && !envelope.addressedToOther
-      && envelope.attachments.some((item) => item.kind === 'image')) {
+    // Every posted picture gets a quick look in the background, the way a person notices a sticker
+    // in passing; likely stickers are kept quietly and mentioned (or not) on the cat's next turn.
+    if (!envelope.addressedToOther && envelope.attachments.some((item) => item.kind === 'image')
+      && (this.#stickers || this.#ctx.get?.('maomaoModels')?.mediaChoice?.('vision')?.enabled) && this.#collectsStickers()) {
       this.#runMediaJob(() => this.#observeImage(envelope));
     }
     return true;
@@ -763,6 +772,7 @@ export class MaomaoQqConnector {
       const learningService = this.#ctx.get?.('maomaoLearning');
       const stickerTools = !test && learningService?.settings.stickers === true && this.#config.stickers?.enabled !== false
         ? openStickerTools({ current: () => current() && learningService.settings.stickers === true, signal, images: stickerImages,
+          note: this.#takeSteals(envelope),
           collect: () => learningService.settings.collectStickers === true && this.#config.stickers?.collect !== false,
           operate: (action, { source: candidateSource, ...args }) => {
             this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
@@ -789,7 +799,9 @@ export class MaomaoQqConnector {
         imageDescription,
         referencedImage: linkedImage ? { sameSender: linkedImage.senderId === envelope.senderId }
           : quoted ? { quoted: true } : null,
-        ambient: this.#shadow?.contextFor(envelope, profile.changedAt) ?? [],
+        // For a reply to the other bot, keep the human message it was answering (the anchor) and
+        // leave out only the bot's own line, which is the current turn.
+        ambient: this.#shadow?.contextFor(peerTurn?.messageId ? { ...envelope, messageId: peerTurn.messageId } : envelope, profile.changedAt) ?? [],
         ordinaryContext,
         profile,
         voice,
@@ -859,7 +871,7 @@ export class MaomaoQqConnector {
     const recent = [...this.#observed.values()].filter((item) => item.receiptKey !== source.receiptKey
       && item.receiptKey !== envelope.receiptKey && !this.#stickerOffered.has(item.receiptKey)
       && item.botId === envelope.botId && item.scope === 'group' && item.chatId === envelope.chatId
-      && Date.now() - item.receivedAt < 10 * 60_000 && !item.text?.trim()
+      && Date.now() - item.receivedAt < 10 * 60_000 && !item.text?.replace(/【表情[^】]*】/g, '').trim()
       && item.attachments.some((attachment) => attachment.kind === 'image' && attachment.sourceUrl)).slice(-2);
     const found = [];
     for (const item of recent) {
@@ -919,9 +931,45 @@ export class MaomaoQqConnector {
     this.#mediaJobs.add(job);
   }
 
+  // Once per install: hide the judge sessions earlier versions left in the DSH sidebar.
+  async #archiveOldJudgeSessions() {
+    const marker = join(this.#storageHome, 'integrations', 'maomao-qq', 'judge-sessions-archived');
+    if (await stat(marker).then(() => true, () => false)) return;
+    const registry = this.#ctx.get?.('workspaceRegistry');
+    if (typeof registry?.archiveSession !== 'function') return;
+    await archiveJudgeSessions(registry, this.#dshHome);
+    await mkdir(dirname(marker), { recursive: true });
+    await writeFile(marker, `${new Date().toISOString()}\n`);
+  }
+
+  // Once per install: hide 猫猫's chat sessions from before the 猫猫的聊天 group existed.
+  async #archiveOldChatSessions() {
+    const marker = join(this.#storageHome, 'integrations', 'maomao-qq', 'old-chat-sessions-archived');
+    if (await stat(marker).then(() => true, () => false)) return;
+    if (!await this.#chatFolder.folder()) return;
+    const archived = await this.#chatFolder.archiveOutside();
+    log('info', 'plugin', '已归档分组之前的旧聊天会话', { archived });
+    await writeFile(marker, `${new Date().toISOString()}\n`);
+  }
+
+  #collectsStickers() {
+    const settings = this.#ctx.get?.('maomaoLearning')?.settings;
+    return settings?.stickers === true ? settings.collectStickers === true && this.#config.stickers?.collect !== false
+      : this.#config.stickers?.collect === true;
+  }
+
+  // What the cat just kept in this chat; the next turn there (any kind) says so in its own words.
+  #takeSteals(envelope) {
+    const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
+    const rows = (this.#steals.get(key) ?? []).filter((row) => Date.now() - row.at < 30 * 60_000);
+    this.#steals.delete(key);
+    return rows.length ? `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用自己的话，像“这张我偷走啦”那样一句就够，可以带上打算什么时候用；别复述图的细节。]` : '';
+  }
+
   async #observeImage(envelope) {
     const [image] = await this.loadImages(envelope.receiptKey);
     if (!image || this.#stopped) return;
+    this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
     const prepared = await this.#ordinary.media('prepare_image', envelope, { data: image.data });
     const models = this.#ctx.get?.('maomaoModels');
     const choice = models?.mediaChoice?.('vision');
@@ -933,8 +981,31 @@ export class MaomaoQqConnector {
       this.#imageDetails.set(envelope.receiptKey, result.description);
     }
     const collected = await this.#ordinary.media('remember_image', envelope,
-      { data: image.data, result, collect: this.#config.stickers.collect === true });
+      { data: image.data, result, collect: this.#collectsStickers(), first_sight: this.#ctx.get?.('maomaoLearning')?.settings?.stickers === true });
+    log('debug', 'sticker', '看了一眼群友的图', { meme: result.is_meme, private: result.personal_or_sensitive, kept: Boolean(collected.notice) });
     if (!collected.notice) return;
+    if (this.#ctx.get?.('maomaoLearning')?.settings.stickers === true) {
+      // Tool mode: no fixed notice; the next turn learns what was kept and the model decides what to say.
+      const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
+      const row = { description: result.description, reason: result.steal_reason, at: Date.now() };
+      this.#steals.set(key, [...(this.#steals.get(key) ?? []), row].slice(-3));
+      if (this.#steals.size > 200) this.#steals.delete(this.#steals.keys().next().value);
+      log('info', 'sticker', '收藏了一张表情', { chat: envelope.chatId.slice(-6), description: result.description });
+      await this.#ordinary.media('finish_notice', envelope, { id: collected.id, success: true });
+      // No turn picked it up soon: say the short line on its own, as a person would right after saving.
+      const timer = setTimeout(() => {
+        const pending = this.#steals.get(key);
+        if (this.#stopped || !pending?.includes(row)) return;
+        this.#steals.delete(key);
+        this.#runMediaJob(() => this.#enqueue(envelope, async () => {
+          if (this.#stopped || Date.now() - envelope.receivedAt > 90_000) return;
+          const sent = (await this.respond(envelope.receiptKey, collected.notice)).length > 0;
+          log('info', 'sticker', '偷表情小提醒', { sent, text: collected.notice });
+        }));
+      }, this.#stealNoticeDelayMs);
+      timer.unref?.();
+      return;
+    }
     let success = false;
     try {
       // An addressed image's regular response was queued before the background classification.

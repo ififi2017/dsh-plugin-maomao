@@ -174,7 +174,7 @@ class OrdinaryService:
                 gallery.annotate_image(turn_id, envelope["text"], result["description"])
                 if not result["is_meme"] or not args.get("collect"):
                     return {}
-                remembered = gallery.remember(source, result, embedder=embedder)
+                remembered = gallery.remember(source, result, embedder=embedder, first_sight=args.get("first_sight") is True)
                 if remembered and remembered["newly_collected"] and gallery.claim_collection_notice(remembered["id"]):
                     return {"notice": collection_reply(remembered["steal_reason"]), "id": remembered["id"]}
                 return {}
