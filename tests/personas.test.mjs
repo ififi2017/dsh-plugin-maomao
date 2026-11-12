@@ -40,3 +40,17 @@ test('a new-group default, per-chat switching and resetting are independent and 
     assert.equal(reloaded.current(group).token, original.token);
   } finally { reloaded.close(); }
 });
+
+test('mounting chat guidance for the default cat keeps her full persona in the replaced prefix', async () => {
+  const sections = [];
+  const registry = { getSectionOrder: () => 10, section: (value) => { sections.push(value); return () => {}; } };
+  const controller = { resolveAgent: async () => ({ agent: { ctx: { get: () => registry } } }) };
+  const { mountChannelPersona: mount } = await import('../integrations/maomao-dsh/personas.mjs');
+  await mount(controller, 's', { name: '猫猫', prompt: '' }, '[聊天工具] 指引');
+  assert.equal(sections[0].name, 'deployment:persona-prefix');
+  assert.match(sections[0].text, /你是猫猫，一只原创的成年河南猫娘/);
+  assert.match(sections[0].text, /## 运行规则/);
+  assert.match(sections[0].text, /\[聊天工具\] 指引$/);
+  await mount(controller, 's', { name: '小狗', prompt: '你是小狗。' }, '');
+  assert.doesNotMatch(sections[1].text, /河南猫娘/, 'a custom persona replaces the cat');
+});

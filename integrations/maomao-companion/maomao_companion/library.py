@@ -126,7 +126,7 @@ class MemeStore:
             rows = [dict(r) for r in db.execute("SELECT speaker,text,observed FROM observations WHERE observed>? ORDER BY observed DESC LIMIT 12", (time.time()-1800,))]
         return list(reversed(rows))
 
-    def remember(self, path, result, explicit=False, embedder=None, *, count_sighting=True):
+    def remember(self, path, result, explicit=False, embedder=None, *, count_sighting=True, first_sight=False):
         path = Path(path)
         if path.stat().st_size > 5_000_000:
             return None
@@ -147,7 +147,8 @@ class MemeStore:
         old = self.known(digest)
         seen = (old["seen"] if old else 0)+int(count_sighting)
         observed = old["last_seen"] if old and not count_sighting else time.time()
-        collected = bool(eligible and (explicit or seen >= 2))
+        # Passive collection normally waits for a second sighting; first_sight keeps a clear sticker at once.
+        collected = bool(eligible and (explicit or first_sight or seen >= 2))
         destination = old.get("path") if old else None
         newly_collected=False
         reason=result.get("steal_reason","")

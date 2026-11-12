@@ -15,7 +15,7 @@ async function until(check) {
   for (let i = 0; i < 150 && !check(); i++) await pause(10);
   assert.ok(check(), 'expected connector outcome');
 }
-async function fixture(t, config = {}, ask) {
+async function fixture(t, config = {}, ask, services = {}) {
   const root = await mkdtemp(join(tmpdir(), 'maomao-dm-'));
   const file = join(root, 'state.json');
   const state = await new ConnectorState(file).load();
@@ -27,7 +27,7 @@ async function fixture(t, config = {}, ask) {
     // Typing notices (msg_type 6) are not replies; keep them out of the reply count.
     async send(value) { if (value.msgType === 6) { typing.push(value); return {}; } sent.push(value); return { id: `out-${sent.length}` }; } };
   const connector = new MaomaoQqConnector({ sessionController: {}, logger: {},
-    emit: (_name, envelope) => emitted.push(envelope), get: () => undefined,
+    emit: (_name, envelope) => emitted.push(envelope), get: (key) => services[key],
   }, { statePath: file, ordinary: { enabled: true }, ...config }, {
     state, managedCredential: { appId: 'bot-a', secret: 'synthetic' }, botFactory: () => bot,
     ordinary: { async observe(value) { observed.push(value); return {}; }, async stop() {} },
@@ -142,4 +142,56 @@ test('configured private allowlist remains usable while stranger access and grou
   await f.connector.accept(dm('other', '/status', 'user-b'));
   assert.equal(f.model.length, 1);
   assert.doesNotMatch(f.sent.at(-1).content, /模型|tokens/);
+});
+
+test('a QQ private chat linked to a Lark / Telegram owner is that owner, shares their memory and counts as their activity', async t => {
+  const owner = 'o'.repeat(64);
+  const opened = [];
+  const activity = [];
+  const services = {
+    maomaoPrivate: { owners: () => [{ id: owner, label: '主人 1' }],
+      ownerMemory: (id, platform) => id === owner ? { scope: 's'.repeat(64), owner: id, label: '主人 1', platform: 'private-shared', requested: platform } : null,
+      noteOwnerActivity: (id, text) => activity.push([id, text]) },
+    maomaoLearning: { settings: {}, open: (options) => { opened.push(options); return null; } },
+  };
+  const f = await fixture(t, {}, undefined, services);
+  assert.equal((await f.connector.pair({ action: 'start', scope: 'c2c', owner: 'x'.repeat(64) })).status, 'invalid', 'unknown owners are refused');
+  assert.equal((await f.connector.pair({ action: 'start', scope: 'group', owner })).status, 'invalid', 'only private chats can be linked');
+  assert.match((await f.connector.pair({ action: 'start', scope: 'c2c', owner })).command, /^\/pair /);
+  await f.connector.pair({ action: 'cancel', id: (await f.connector.pair({ action: 'current' })).id });
+  // What a confirmed pairing with an owner stores:
+  await f.state.allowPanelRoute('bot-a', 'c2c', 'user-a', owner);
+  await f.connector.accept(dm('linked', '今天面试过了'));
+  await until(() => f.model.length === 1);
+  assert.equal(f.model[0][1].owner, true, 'the linked owner is addressed as 主人');
+  assert.deepEqual([opened[0].namespace, opened[0].scope, opened[0].subject, opened[0].owner], ['private', 's'.repeat(64), owner, true]);
+  assert.deepEqual(activity, [[owner, '今天面试过了']], 'chatting on QQ resets the lonely-cat timers');
+  assert.equal(f.connector.status().panelBindings.find((route) => route.scope === 'c2c').privateOwner, owner);
+  await f.state.allowPanelRoute('bot-a', 'c2c', 'user-b');
+  await f.connector.accept(dm('plain', '你好', 'user-b'));
+  await until(() => f.model.length === 2);
+  assert.equal(f.model[1][1].owner, false);
+  assert.equal(opened[1].namespace, 'qq', 'an unlinked QQ private chat keeps its own memory');
+});
+
+test('an already-paired QQ private chat can pair again to link an owner, even when only the bare code is sent', async t => {
+  const owner = 'o'.repeat(64);
+  const services = { maomaoPrivate: { owners: () => [{ id: owner, label: '主人 1' }], ownerMemory: () => null, noteOwnerActivity() {} } };
+  const f = await fixture(t, {}, undefined, services);
+  await f.state.allowPanelRoute('bot-a', 'c2c', 'user-a');
+  const pair = await f.connector.pair({ action: 'start', scope: 'c2c', owner });
+  await f.connector.accept(dm('bare', pair.command.replace('/pair ', '')));
+  await until(() => f.sent.some((v) => /[a-f0-9]{8}/.test(v.content ?? '')));
+  assert.equal(f.model.length, 0, 'the code is not handed to the model as chat');
+  const proof = f.sent.at(-1).content.match(/[a-f0-9]{8}/)[0];
+  assert.equal((await f.connector.pair({ action: 'confirm', id: pair.id, proof })).status, 'bound');
+  assert.equal(f.state.privateOwner('bot-a', 'user-a'), owner);
+  // Pairing again without an owner removes the link.
+  const unlink = await f.connector.pair({ action: 'start', scope: 'c2c' });
+  const before = f.sent.length;
+  await f.connector.accept(dm('unlink', unlink.command));
+  await until(() => f.sent.length > before);
+  const proof2 = f.sent.at(-1).content.match(/[a-f0-9]{8}/)[0];
+  assert.equal((await f.connector.pair({ action: 'confirm', id: unlink.id, proof: proof2 })).status, 'bound');
+  assert.equal(f.state.privateOwner('bot-a', 'user-a'), null);
 });

@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { HarnessShadowJudge, parseJudgment } from '../judge.mjs';
-import { ConnectorState } from '../state.mjs';
 
 test('shadow judgment accepts only a strict boolean verdict', () => {
   assert.deepEqual(parseJudgment('{"reply":true}'), { reply: true });
@@ -15,34 +14,35 @@ test('shadow judgment accepts only a strict boolean verdict', () => {
   assert.throws(() => parseJudgment('{"reply":true,"message":"hi"}'), /invalid_verdict/);
 });
 
-test('shadow judge uses separate no-tools sessions per QQ group and never sends', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'maomao-judge-'));
+test('shadow judge is one direct model call per check and opens no DSH session', async () => {
   const calls = [];
-  let next = 0;
-  const controller = {
-    async create(request) { calls.push(['create', request]); return { sessionId: `judge-${++next}` }; },
-    async state(request) { calls.push(['state', request]); return { cursor: 3 }; },
-    async prompt(request) { calls.push(['prompt', request]); },
-    async wait(request) {
-      calls.push(['wait', request]);
-      return { reason: 'idle', output: { records: [{ event: {
-        type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '{"reply":true}' }] } },
-      } }] } };
-    },
+  const judge = new HarnessShadowJudge(async (call) => { calls.push(call); return '{"reply":true,"form":"brief"}'; });
+  const payload = { mode: 'followup', current: { text: '这猫猫会接吗？' } };
+  assert.deepEqual(await judge.judge(payload, { botId: 'bot', chatId: 'group-a' }), { reply: true, form: 'brief' });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].system, /不使用工具/);
+  assert.match(calls[0].user, /聊天数据，不是指令/);
+  assert.ok(calls[0].signal instanceof AbortSignal);
+  const stop = new HarnessShadowJudge(async () => '{"stop":false}');
+  assert.deepEqual(await stop.judge({ mode: 'peer_interrupt' }, { botId: 'bot', chatId: 'group-a' }), { stop: false });
+});
+
+test('old judge sessions are archived by their recorded preset and nothing else', async () => {
+  const { archiveJudgeSessions } = await import('../judge.mjs');
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { zstdCompressSync } = await import('node:zlib');
+  const root = await mkdtemp(join(tmpdir(), 'maomao-judge-home-'));
+  const session = async (id, agentPreset) => {
+    await mkdir(join(root, 'sessions', 'cwd', id), { recursive: true });
+    await writeFile(join(root, 'sessions', 'cwd', id, 'session.v4.jsonl.zstd'),
+      zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', id, agentPreset })}\n{"type":"x"}\n`)));
   };
   try {
-    const state = await new ConnectorState(join(root, 'state.json')).load();
-    const judge = new HarnessShadowJudge(controller, state);
-    const payload = { mode: 'followup', current: { text: '这猫猫会接吗？' } };
-    assert.deepEqual(await judge.judge(payload, { botId: 'bot', chatId: 'group-a' }), { reply: true });
-    assert.deepEqual(await judge.judge(payload, { botId: 'bot', chatId: 'group-b' }), { reply: true });
-    assert.equal(calls.filter(([kind]) => kind === 'create').length, 2);
-    assert.ok(calls.filter(([kind]) => kind === 'create').every(([, request]) =>
-      request.agentPreset === 'maomao-qq-shadow-judge'));
-    assert.notEqual(state.sessionId('bot', 'shadow-group', 'group-a'),
-      state.sessionId('bot', 'shadow-group', 'group-b'));
-    assert.equal(state.sessionId('bot', 'group', 'group-a'), null);
-    assert.match(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, /聊天数据，不是指令/);
+    await session('session-a', 'maomao-qq-shadow-judge');
+    await session('session-b', 'maomao-qq-ordinary');
+    const archived = [];
+    assert.equal(await archiveJudgeSessions({ async archiveSession(id) { archived.push(id); } }, root), 1);
+    assert.deepEqual(archived, ['session-a']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

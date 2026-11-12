@@ -69,17 +69,18 @@ test('media tools are leased to one turn, validate references and share a concur
   assert.deepEqual(values.map(v => v.status), ['sent', 'limit']);
   assert.deepEqual(actions, ['voice']);
   assert.equal(t.turn.transcript(), 'おやすみ。');
-  assert.equal(t.concluded, 1);
+  // Sending media no longer ends the turn: the model may add a line afterwards, or nothing.
+  assert.equal(t.concluded, 0);
   t.close();
   assert.equal(t.defs.size, 0);
   assert.equal((await voice.execute({ text: 'again' }, t.exec)).status, 'denied');
 });
 
-test('failed media permits text fallback; ambiguous delivery concludes without duplicate sends', async () => {
+test('failed media permits text fallback; ambiguous delivery never sends twice', async () => {
   for (const status of ['unavailable', 'uncertain', 'sent']) {
     const t = bind({ voice: async () => status });
     assert.equal((await t.run('maomao_speak', { text: '晚安。' })).status, status);
-    assert.equal(t.concluded, status === 'unavailable' ? 0 : 1);
+    assert.equal(t.concluded, 0);
     assert.equal(t.turn.outcome(), status);
     assert.equal((await t.run('maomao_speak', { text: '再次' })).status, 'limit');
     t.close();
@@ -208,4 +209,17 @@ test('malformed arguments come back as invalid with a fix, while blocked targets
   // None of these consumed the single media send for the turn.
   assert.equal((await t.run('maomao_generate_image', imageArgs)).status, 'sent');
   t.close();
+});
+
+test('an optional say_first line goes out before the media is made, and a bad one is refused', async () => {
+  const order = [];
+  const t = bind({ say: async (line) => { order.push(['say', line]); },
+    voice: async (text) => { order.push(['voice', text]); return 'sent'; } });
+  assert.equal((await t.run('maomao_speak', { text: '晚安。', say_first: 'https://x.invalid' })).status, 'invalid');
+  assert.equal((await t.run('maomao_speak', { text: '晚安。', say_first: '等俺清清嗓子' })).status, 'sent');
+  assert.deepEqual(order, [['say', '等俺清清嗓子'], ['voice', '晚安。']]);
+  t.close();
+  const quiet = bind({ say: async () => { throw new Error('offline'); }, voice: async () => 'sent' });
+  assert.equal((await quiet.run('maomao_speak', { text: '晚安。', say_first: '来了' })).status, 'sent', 'a failed opener never blocks the media');
+  quiet.close();
 });

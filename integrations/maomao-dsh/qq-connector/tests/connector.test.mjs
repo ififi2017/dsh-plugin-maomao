@@ -441,6 +441,7 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
   try {
     const state = await new ConnectorState(join(directory, 'state.json')).load();
     const calls = [];
+    const sections = [];
     await state.bindSession('', 'group', 'group-one', 'legacy-standard');
     const controller = {
       async create(request) { calls.push(['create', request]); return { sessionId: 'session-one' }; },
@@ -448,7 +449,8 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
         ? 'standard' : 'maomao-qq-ordinary' } }; },
       async state(request) { calls.push(['state', request]); return { cursor: 7 }; },
       async prompt(request) { calls.push(['prompt', request]); return { accepted: true }; },
-      async resolveAgent() { return { agent: { ctx: { get: (name) => name === 'systemPrompt' ? { getSectionOrder: () => 0, section: () => () => {} } : undefined } } }; },
+      async resolveAgent() { return { agent: { ctx: { get: (name) => name === 'systemPrompt'
+        ? { getSectionOrder: () => 0, section: (value) => { sections.push(value.text); return () => {}; } } : undefined } } }; },
       async wait(request) {
         calls.push(['wait', request]);
         return { reason: 'idle', output: { records: [{ event: {
@@ -467,15 +469,17 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
     assert.equal(calls.find(([kind]) => kind === 'create')[1].agentPreset, 'maomao-qq-ordinary');
     assert.equal(calls.find(([kind]) => kind === 'prompt')[1].sessionId, 'session-one');
     assert.equal(calls.find(([kind]) => kind === 'wait')[1].afterSeq, 7);
-    assert.match(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, /你好\n\[这次没看到这张图。用一句自己的话带过/);
-    assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
-      /近期同群消息，仅供理解上下文/);
-    assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
-      /本 QQ 会话当前发言者的普通记忆/);
+    // The stored message keeps only what was said; this turn's reference material rides in the
+    // turn's system section, which is removed afterwards, so it never piles up in history.
+    assert.equal(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, '你好');
+    assert.match(sections[0], /本轮参考资料[\s\S]*\[这次没看到这张图。用一句自己的话带过/);
+    const second = calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text;
+    assert.doesNotMatch(second, /近期同群消息|普通记忆/);
+    assert.match(sections.at(-1), /近期同群消息，仅供理解上下文/);
+    assert.match(sections.at(-1), /本 QQ 会话当前发言者的普通记忆[\s\S]*拍翠鸟/);
     assert.equal(await bridge.ask({ ...envelope, messageId: 'message-three' }, { passive: true, owner: true }), '喵～');
-    assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
-      /用户要求“一句”时严格只回一句/);
-    assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text, /当前发言者已在本 QQ 会话验证为主人/);
+    assert.match(sections.at(-1), /用户要求“一句”时严格只回一句/);
+    assert.match(sections.at(-1), /当前发言者已在本 QQ 会话验证为主人/);
     const quote = { ...envelope, messageId: 'message-quote', text: '', attachments: [] };
     assert.equal(await bridge.ask(quote, { referencedImage: { quoted: true }, imageDescription: '一只翠鸟' }), '喵～');
     assert.match(calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text,
