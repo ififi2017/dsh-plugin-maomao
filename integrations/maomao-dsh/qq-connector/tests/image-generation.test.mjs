@@ -107,12 +107,12 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
         assert.deepEqual(await definition.execute(args, { ...exec, agent: { id: 'unrelated' } }), { status: 'denied', data: '' });
         assert.deepEqual(await definition.execute(args, exec), { status: 'sent', data: '' });
         assert.deepEqual(await definition.execute(args, exec), { status: 'limit', data: '' });
-        assert.ok(terminated);
+        assert.ok(!terminated, 'the turn stays open so the cat may add a line after the image');
       } catch (error) { rejectHandled(error); throw error; }
     },
     async wait() {
       resolveHandled(); return { reason: 'idle', output: { records: [
-      { event: { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'duplicate' }] } } } },
+      { event: { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '水彩味儿够不够？' }] } } } },
     ] } }; },
   };
   const connector = new MaomaoQqConnector({ sessionController: controller, emit() {}, logger: console },
@@ -133,7 +133,10 @@ test('native image tool is bound to one admitted QQ turn and delivers only once'
     assert.equal(calls.length, 1);
     assert.equal(calls[0].model, 'gemini-3.1-flash-image');
     assert.deepEqual(calls[0].input[1], { type: 'image', mime_type: 'image/png', data: png });
-    assert.deepEqual(sent.map((item) => [item.target.msgId, item.msgType, item.extra.msg_seq]), [['message-a', 7, 1]]);
+    for (let i = 0; i < 100 && sent.length < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    // The image once, then the model's own follow-up line.
+    assert.deepEqual(sent.map((item) => [item.target.msgId, item.msgType]), [['message-a', 7], ['message-a', 0]]);
+    assert.equal(sent[1].content, '水彩味儿够不够？');
   } finally {
     await connector.stop();
     assert.equal(definition, undefined);

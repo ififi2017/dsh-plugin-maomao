@@ -3,8 +3,8 @@ window.__ModuleLoader__.load({
   factory(require) {
     const { createElement: h, Fragment: ReactFragment, useCallback, useEffect, useRef, useState, useSyncExternalStore } = require('react');
     const states = { ready: '已连接', waiting: '等待连接', off: '未启用' };
-    const sharedMemoryStates = { off: '未启用', active: '已共享', waiting_channels: '已开启，待接入另一渠道',
-      waiting_owner: '已开启，待绑定同一主人' };
+    const sharedMemoryStates = { off: '未开启', active: '正在共享', waiting_channels: '已开启 · 还差另一个私聊渠道',
+      waiting_owner: '已开启 · 还没有私聊绑定到同一位主人' };
     const modes = { off: '未启用', manual: '仅手动', shadow: '模拟', send: '实际发送' };
     const results = { unavailable: '暂不满足发送条件', shadow: '已模拟', denied: '请求被拒绝',
       cancelled: '已取消', uncertain: '投递待确认', sent: '已投递' };
@@ -24,7 +24,7 @@ window.__ModuleLoader__.load({
       already_bound: '这个会话已绑定。', bound: '已绑定，可以开始聊天。', cancelled: '已取消配对。',
       reassigned: '已关联到同一主人。', binding_changed: '绑定已变更，请刷新后重新操作。',
       locked: '确认码连续输错五次，请重新生成。', busy: '这个渠道已有配对，继续填写确认码或先取消。',
-      choose_owner: '请先选择要关联的主人，或选择为另一人建立独立记忆。',
+      choose_owner: '请先选择这个私聊属于哪位主人，或设为新的主人。',
     };
     const previewLabels = {
       disabled: '尚未启用定时主动分享。', busy: '正在处理另一条消息或分享任务。', offline: '目标渠道尚未连接。',
@@ -364,7 +364,7 @@ window.__ModuleLoader__.load({
         setNotice('');
         try {
           if (action === 'start' && needsOwnerChoice && !ownerChoice) return;
-          const request = action === 'start' ? { action, platform, scope, owner: platform === 'qq' ? '' : (owner ?? ''),
+          const request = action === 'start' ? { action, platform, scope, owner: platform === 'qq' ? (scope === 'c2c' ? owner ?? '' : '') : (owner ?? ''),
             ...(relink ? { bindingId: relink.id } : {}) } : { action, platform, id: pairingId, proof: proof.trim().toLowerCase() };
           const result = await invoke('pair', { request });
           if (action === 'start' && (result.command || result.status === 'busy')) {
@@ -399,19 +399,24 @@ window.__ModuleLoader__.load({
             h('option', { value: 'owner' }, 'QQ群主人身份'))
             : needsOwnerChoice && h('select', { 'aria-label': '主人及记忆归属', value: ownerChoice ? owner || 'new' : 'choose', style: inputStyle,
               disabled: pending, onChange: (event) => setOwner(event.target.value === 'new' ? '' : event.target.value) },
-            h('option', { value: 'choose', disabled: true }, relink ? '选择另一端的主人' : '选择这个私聊的记忆归属'),
-            !relink && h('option', { value: 'new' }, '这是另一个人 · 建立独立记忆'),
-            owners.map((item) => h('option', { key: item.id, value: item.id }, `这是同一个人 · ${ownerSummary(item)}`)))),
+            h('option', { value: 'choose', disabled: true }, relink ? '选择要关联的主人' : '这个私聊是谁？'),
+            !relink && h('option', { value: 'new' }, '新的主人 · 记忆单独记'),
+            owners.map((item) => h('option', { key: item.id, value: item.id }, `同一位主人 · ${ownerSummary(item)}`)))),
+          // A QQ private chat can share identity and memory with an existing Lark / Telegram owner.
+          platform === 'qq' && requestedScope === 'c2c' && owners.length > 0 && h('select', { 'aria-label': '这个 QQ 私聊是谁', value: owner ?? '', style: inputStyle,
+            disabled: Boolean(pairing) || pending, onChange: (event) => setOwner(event.target.value) },
+          h('option', { value: '' }, '不关联主人 · 这个 QQ 私聊单独记'),
+          owners.map((item) => h('option', { key: item.id, value: item.id }, `同一位主人 · ${ownerSummary(item)}`))),
           !pairing && button(relink ? '生成关联指令' : '生成配对指令', () => pair('start'),
             restoring || pending || (needsOwnerChoice && !ownerChoice), 'primary'),
           relink && !pairing && button('返回', closeRelink, pending)),
         online && !pairing && needsOwnerChoice && !relink && h('p', { style: { margin: 0 } },
-          '关联已有主人后，两端在开启共享时可读取同一份普通记忆。另一人使用独立的记忆。'),
+          '选同一位主人后，猫猫会认出这是同一个人；开启「私聊记忆共享」时，各渠道记得的是同一份事。新的主人单独记。'),
         !online && !pairing && h('p', { style: { margin: 0 } }, '完成上一步，等 Bot 显示「已连接」后即可配对。'),
         pairing && h('div', { style: { display: 'grid', gap: 8 } },
           platform !== 'qq' && h('p', { style: { margin: 0 } }, pairing.owner
             ? `本次关联：${snapshot.bindings.private.find((item) => item.id === pairing.owner)?.label ?? '所选主人'}`
-            : '本次绑定使用独立记忆。'),
+            : '本次绑定为新的主人，记忆单独记。'),
           h('p', { style: { margin: 0 } }, pairing.link ? '打开 Telegram，点击开始以验证这个私聊。' : platform === 'qq' && requestedScope !== 'c2c'
             ? (requestedScope === 'owner' ? '由要绑定的主人在已加入白名单的 QQ 群 @猫猫，发送下面的指令。' : '在目标 QQ 群 @猫猫，发送下面的指令。')
             : '把下面的指令发给这个渠道的猫猫私聊。'),
@@ -479,13 +484,14 @@ window.__ModuleLoader__.load({
       }
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 8, fontSize: type.body } },
         h('h3', { style: { margin: 0 } }, '管理已绑定会话'),
-        h('p', { style: { margin: 0 } }, `这里只显示 ${destinations[platform]} 的绑定。配对允许聊天，主人身份决定称呼与私聊记忆归属。`),
+        h('p', { style: { margin: 0 } }, `这里只显示 ${destinations[platform]} 的绑定。配对决定谁能和猫猫聊天；主人身份决定猫猫怎么称呼对方、私聊记忆记在谁名下。`),
         entries.length === 0 && h('p', { style: { margin: 0 } }, '暂无面板绑定。'),
         ...entries.map((route) => h('div', { key: route.id, className: 'maomao-binding' },
           h('span', null, `${destinations[route.platform]} · ${route.platform === 'qq'
             ? ({ group: '群白名单', c2c: '私聊白名单', owner: '群主人身份' }[route.scope] ?? '会话')
             : owners.find((owner) => owner.id === route.ownerId)?.label ?? `主人 ${route.owner}`}`,
-          ` · ${(route.groupOpenId ?? route.userOpenId ?? route.id).slice(-8)}`),
+          ` · ${(route.groupOpenId ?? route.userOpenId ?? route.id).slice(-8)}`,
+          route.privateOwner ? ` · 关联主人 ${owners.find((owner) => owner.id === route.privateOwner)?.label ?? route.privateOwner.slice(-6)}（私聊记忆跟随这位主人）` : ''),
           h('details', null, h('summary', { style: { cursor: 'pointer', opacity: 0.7 } }, '查看完整标识'),
             h('code', { style: { overflowWrap: 'anywhere', display: 'block', fontSize: type.caption } }, route.groupOpenId ? `群 OpenID：${route.groupOpenId}`
               : route.userOpenId ? `用户 OpenID：${route.userOpenId}` : `绑定 ID：${route.id}`)),
@@ -1077,11 +1083,12 @@ window.__ModuleLoader__.load({
         section === 'memory' && h(PreferenceCard, { title: '私聊记忆', section: 'privateMemory', initial: settings.privateMemory, invoke, onChange, drafts },
           (value, set, busy) => h(ReactFragment, null,
             checkbox('启用普通私聊记忆', value.enabled, (checked) => set('enabled', checked), busy),
-            checkbox('同一主人在飞书 / Lark 和 Telegram 共享普通记忆', value.shared, (checked) => set('shared', checked), busy || !value.enabled),
-            h('p', { style: { margin: 0 } }, '两个私聊需要在「渠道与会话」绑定到同一位主人。关闭共享后两端各自记录，已存的共享记忆仍会保留。'))),
-        section === 'memory' && h(PreferenceCard, { title: 'QQ 独立记忆', section: 'qqMemory', initial: settings.qqMemory, invoke, onChange, drafts },
+            checkbox('同一位主人的私聊共享记忆：飞书 / Lark、Telegram 和已关联主人的 QQ 私聊', value.shared, (checked) => set('shared', checked), busy || !value.enabled),
+            h('p', { style: { margin: 0 } }, '先在「渠道与会话」把这些私聊绑定到同一位主人。关闭后各渠道分开记，已经共享的记忆不会被删除。'))),
+        section === 'memory' && h(PreferenceCard, { title: 'QQ 群与未关联私聊的记忆', section: 'qqMemory', initial: settings.qqMemory, invoke, onChange, drafts },
           (value, set, busy) => h(ReactFragment, null,
-            checkbox('启用 QQ 独立记忆', value.enabled, (checked) => set('enabled', checked), busy),
+            checkbox('启用 QQ 群与未关联私聊的记忆', value.enabled, (checked) => set('enabled', checked), busy),
+            h('p', { style: { margin: 0 } }, '每个 QQ 群、每个没关联主人的 QQ 私聊各记各的，不会进入主人的共享记忆。'),
             checkbox('在启用 QQ 表情库时使用 Embedding 检索', value.stickerEmbedding,
               (checked) => set('stickerEmbedding', checked), busy))),
         section === 'sharing' && h(PreferenceCard, { title: '主动分享设置', section: 'sharing', initial: settings.sharing, invoke, onChange, drafts },
@@ -1113,7 +1120,7 @@ window.__ModuleLoader__.load({
     }
 
     const learningKinds = { profile: '对象档案', episode: '经历与待办', skill: '可复用技能', style: '语气与互动习惯', meme: '梗知识', followup: '惦记的事', diary: '猫猫日记' };
-    const learningPlatforms = { desktop: '桌面', private: '私聊', 'private-shared': '授权私聊共享', qq: 'QQ', feishu: 'Lark / 飞书', telegram: 'Telegram' };
+    const learningPlatforms = { desktop: '桌面', private: '私聊', 'private-shared': '主人私聊共享', qq: 'QQ', feishu: 'Lark / 飞书', telegram: 'Telegram' };
     const learningTtl = { episode: 30, followup: 14, diary: 60 };
     const learningResults = { saved: '已保存', failed: '操作失败，请重试', conflict: '这条内容刚有更新，请刷新后再修改',
       invalid: '内容或参数不符合要求', missing: '这条内容已不可用', unavailable: '学习服务尚未就绪', forgotten: '已遗忘，请从版本记录恢复' };
@@ -1175,7 +1182,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: stackStyle },
         h('section', { style: { ...sectionStyle, ...stackStyle } },
           h('h3', { style: { margin: 0 } }, '猫猫学到了什么'),
-          h('p', { style: { margin: 0 } }, '猫猫会从普通聊天学习记忆、语气、梗和表情搭配，按需要查询和复用。每条保留来源和最近 20 个版本。QQ 按群或私聊隔离；已授权共享的 Lark 与 Telegram 按主人合并。'),
+          h('p', { style: { margin: 0 } }, '猫猫会从普通聊天学习记忆、语气、梗和表情搭配，按需要查询和复用。每条保留来源和最近 20 个版本。QQ 群按群分开记；同一位主人的飞书 / Lark、Telegram 和已关联的 QQ 私聊，在开启共享后合并为一份。'),
           catalog && h('div', { style: stackStyle },
             h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.enabled), onChange: e => setting('enabled', e.target.checked) }), ' 允许自主记忆和技能复用'),
             h('label', null, h('input', { type: 'checkbox', checked: Boolean(settings.reflection), onChange: e => setting('reflection', e.target.checked) }), ' 回复后后台总结（使用当前对话模型，产生额外调用）'),
@@ -1567,7 +1574,7 @@ window.__ModuleLoader__.load({
                 platform === 'qq' && h(QqDirectMessages, { settings: snapshot.qqDirectMessages ?? {},
                   online: snapshot.channels.qq === 'ready', invoke, onChange, drafts }),
                 h('details', null, h('summary', { style: { cursor: 'pointer' } }, '连接、配对和主人有什么区别？'),
-                  h('p', { style: mutedStyle }, '连接让 Bot 上线；配对允许这个群或私聊聊天；主人绑定决定身份与普通私聊记忆归属。QQ 的聊天授权不等于主人身份，QQ 记忆也不与其他平台合并。'))),
+                  h('p', { style: mutedStyle }, '连接让 Bot 上线；配对允许这个群或私聊聊天；主人绑定决定身份与普通私聊记忆归属。QQ 群的聊天授权不等于主人身份；QQ 私聊可在配对时关联到已有主人，和其他渠道共享私聊记忆。'))),
               h('div', { hidden: channelTab !== 'test' },
                 h(FirstReply, { key: `first-reply-${platform}`, snapshot, invoke, platform, preferred, openModels }))),
             view === 'personas' && h(ReactFragment, null,
@@ -1584,9 +1591,9 @@ window.__ModuleLoader__.load({
               memoryTab === 'learning' && h(LearningView, { invoke, drafts }),
               memoryTab === 'stickers' && h(StickerLibrary, { invoke }),
               memoryTab === 'settings' && h(ReactFragment, null,
-                h(StatusCard, { title: '当前记忆范围', rows: [['私聊普通记忆', enabled(snapshot.memory.private)],
-                  ['Lark / 飞书与 Telegram 共享', sharedMemoryStates[snapshot.memory.sharedState] ?? enabled(snapshot.memory.shared)],
-                  ['QQ 独立记忆', enabled(snapshot.memory.qq)]] }),
+                h(StatusCard, { title: '当前记忆范围', rows: [['私聊记忆', enabled(snapshot.memory.private)],
+                  ['同一主人跨渠道共享', sharedMemoryStates[snapshot.memory.sharedState] ?? enabled(snapshot.memory.shared)],
+                  ['QQ 群与未关联私聊', enabled(snapshot.memory.qq)]] }),
                 snapshot.memory.sharedState === 'waiting_owner' && relinkTargets.length > 0 && button('关联同一主人', () => openRelink(relinkTargets[0])),
                 h(MemorySettings, { invoke, onChange, drafts, section: 'memory' })),
               memoryTab === 'index' && h(ReactFragment, null, h(EmbeddingIndex, { invoke }),

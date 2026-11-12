@@ -187,15 +187,23 @@ export class ConnectorState {
     const known = new Map(observed.map((chatId) => [routeKey(botId, 'group', chatId), chatId]));
     return Object.entries(this.#data.panelRoutes ?? {}).filter(([, entry]) => (entry?.account ?? entry) === account)
       .map(([id, entry]) => ({ id, scope: entry?.scope ?? (known.has(id) ? 'group' : null),
-        groupOpenId: entry?.groupOpenId ?? known.get(id), userOpenId: entry?.userOpenId }));
+        groupOpenId: entry?.groupOpenId ?? known.get(id), userOpenId: entry?.userOpenId,
+        ...(entry?.privateOwner ? { privateOwner: entry.privateOwner } : {}) }));
   }
 
-  async allowPanelRoute(botId, scope, chatId) {
+  // privateOwner links a QQ private chat to a Lark / Telegram owner (shared identity and memory).
+  async allowPanelRoute(botId, scope, chatId, privateOwner = null) {
     return this.#write((next) => {
       next.panelRoutes ??= {};
       next.panelRoutes[routeKey(botId, scope, chatId)] = { account: digestOf(botId), scope,
-        ...(scope === 'group' ? { memory: groupMemory(botId, chatId), groupOpenId: chatId } : { userOpenId: chatId }) };
+        ...(scope === 'group' ? { memory: groupMemory(botId, chatId), groupOpenId: chatId }
+          : { userOpenId: chatId, ...(privateOwner ? { privateOwner } : {}) }) };
     });
+  }
+
+  privateOwner(botId, chatId) {
+    const entry = this.#data.panelRoutes?.[routeKey(botId, 'c2c', chatId)];
+    return entry?.account === digestOf(botId) && typeof entry.privateOwner === 'string' ? entry.privateOwner : null;
   }
 
   memoryGroups(botId, configured = []) {

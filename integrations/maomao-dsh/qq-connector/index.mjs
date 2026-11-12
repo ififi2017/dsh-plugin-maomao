@@ -71,6 +71,7 @@ export class MaomaoQqConnector {
   #ready = false;
   #lastError = '';
   #observed = new Map();
+  #stickerOffered = new Set();
   #imageInFlight = new Map();
   #queues = new Map();
   #shadow;
@@ -340,19 +341,32 @@ export class MaomaoQqConnector {
   #isOwner({ botId, scope, chatId, senderId }) {
     const owners = this.#config.shadow?.ownerIds;
     return (Array.isArray(owners) && owners.includes(senderId))
-      || (scope === 'group' && this.#state.panelOwnsGroup(botId, chatId, senderId));
+      || (scope === 'group' && this.#state.panelOwnsGroup(botId, chatId, senderId))
+      || Boolean(this.#linkedOwner({ botId, scope, chatId, senderId }));
+  }
+
+  #privateOwners() { return this.#ctx.get?.('maomaoPrivate')?.owners?.() ?? []; }
+
+  // The Lark / Telegram owner this QQ private chat was linked to at pairing, if that owner still exists.
+  #linkedOwner({ botId, scope, chatId, senderId }) {
+    if (scope !== 'c2c' || chatId !== senderId) return null;
+    const owner = this.#state.privateOwner(botId, chatId);
+    return owner && this.#privateOwners().some(({ id }) => id === owner) ? owner : null;
   }
 
   unbind(id) { return this.#state.removePanelRoute(this.#appId, id); }
 
-  async pair({ action, scope, id, proof }) {
+  async pair({ action, scope, id, proof, owner: requestedOwner }) {
+    const owner = typeof requestedOwner === 'string' && requestedOwner ? requestedOwner : null;
     if (this.#pairing?.expires <= Date.now()) this.#pairing = null;
     if (action === 'start') {
       if (!this.#ready || this.#config.dryRun === true) return { status: 'unavailable' };
       if (!['group', 'c2c', 'owner'].includes(scope)) return { status: 'invalid' };
+      // A QQ private chat may be linked to an existing Lark / Telegram owner.
+      if (owner !== null && (scope !== 'c2c' || !this.#privateOwners().some(({ id: known }) => known === owner))) return { status: 'invalid' };
       if (this.#pairing) return { status: 'busy' };
       this.#pairing = { id: randomUUID(), scope, code: randomBytes(12).toString('hex'),
-        expires: Date.now() + 5 * 60_000, attempts: 0 };
+        expires: Date.now() + 5 * 60_000, attempts: 0, owner };
     }
     const pairing = this.#pairing;
     if (action === 'current' && !pairing) return { status: 'idle' };
@@ -378,7 +392,7 @@ export class MaomaoQqConnector {
         const configured = allowedInbound(pairing.envelope, this.#config);
         if (!await this.#state.bindPanelOwner(botId, chatId, senderId, configured)) return { status: 'unavailable' };
       } else {
-        await this.#state.allowPanelRoute(botId, scope, chatId);
+        await this.#state.allowPanelRoute(botId, scope, chatId, scope === 'c2c' ? pairing.owner : null);
         this.#greetAfterPairing(pairing.envelope);
       }
       return pairing.scope === 'owner' ? { status: 'bound' } : { status: 'bound', route: routeKey(botId, scope, chatId) };
@@ -465,7 +479,13 @@ export class MaomaoQqConnector {
     const envelope = normalizeInbound(message, Date.now(), this.#appId);
     if (!envelope) return false;
     const allowed = this.#allowed(envelope);
-    const commandText = envelope.text.replace(/^<@!?[A-Za-z0-9_-]{1,128}>\s*/, '');
+    let commandText = envelope.text.replace(/^<@!?[A-Za-z0-9_-]{1,128}>\s*/, '');
+    // Some QQ clients swallow the leading "/pair" and deliver only the code. While a QQ private
+    // pairing is waiting, a bare matching code counts as the pairing command.
+    if (envelope.scope === 'c2c' && this.#pairing?.scope === 'c2c' && commandText.trim() === this.#pairing.code) {
+      commandText = `/pair ${this.#pairing.code}`;
+      log('info', 'qq', '收到不带 /pair 的配对码，按配对指令处理');
+    }
     if (envelope.scope === 'c2c') {
       this.#diagnostics.directMessage = { at: Date.now(), outcome: allowed ? 'admitted' : 'needs_pairing' };
       if (commandText.toLowerCase() === '/pair') return this.#dmNotice(envelope, this.#pairHelp(envelope), 'pair');
@@ -482,16 +502,20 @@ export class MaomaoQqConnector {
     if (/^\/pair(?:\s|$)/i.test(commandText)) {
       const pairCode = envelope.addressed && /^\/pair ([a-f0-9]{24})$/.exec(commandText)?.[1];
       const pairing = this.#pairing;
+      // An already-paired QQ private chat may pair again to link or unlink an owner.
       const matching = pairing?.scope === 'owner'
         ? allowed && envelope.scope === 'group' && !this.#state.panelOwnsGroup(envelope.botId, envelope.chatId, envelope.senderId)
-        : !this.#paired(envelope) && pairing?.scope === envelope.scope;
+        : (!this.#paired(envelope) || envelope.scope === 'c2c') && pairing?.scope === envelope.scope;
       if (!pairCode || !matching || pairing.envelope
         || pairing.expires <= Date.now() || pairing.code !== pairCode) {
+        log('info', 'qq', '配对指令未通过', { scope: envelope.scope, hasCode: Boolean(pairCode), pending: pairing?.scope ?? null,
+          alreadyPaired: this.#paired(envelope), codeMatches: Boolean(pairing && pairCode === pairing.code), expired: Boolean(pairing && pairing.expires <= Date.now()) });
         return envelope.scope === 'c2c' ? this.#dmNotice(envelope,
           this.#paired(envelope) ? this.#pairHelp(envelope) : '配对指令已失效或不匹配，请在猫猫面板重新生成 QQ 私聊配对指令。发送 /pair 查看步骤。', 'pair') : false;
       }
       pairing.envelope = envelope;
       pairing.proof = randomBytes(4).toString('hex');
+      log('info', 'qq', '配对指令通过，已发送确认码', { scope: envelope.scope, linkOwner: Boolean(pairing.owner) });
       try {
         if (!await this.#state.recordReceipt(envelope)) return false;
         if (pairing !== this.#pairing || pairing.expires <= Date.now()) return false;
@@ -667,7 +691,9 @@ export class MaomaoQqConnector {
       const earlierImages = recentImages.length > 1
         ? (await Promise.all(recentImages.slice(0, -1).map((item) => this.loadImages(item.receiptKey)))).flat()
           .filter((image) => image.mediaType !== 'image/gif') : [];
-      const stickerImages = images;
+      // Stickers people posted in the group recently (not addressed to the cat) are offered too,
+      // each once, so the cat can keep ones it likes the next time it speaks there.
+      const stickerImages = [...images, ...(!test && !peerTurn ? await this.#ambientStickers(envelope, source) : [])];
       let imageDescription = peerTurn ? null : this.#imageDetails.get(source.receiptKey);
       // The standard Gemini image route has no GIF input. With enrichment enabled, use the same JPEG preview.
       if (images[0]?.mediaType === 'image/gif' && (this.#ordinary || visionChoice?.enabled)) {
@@ -703,6 +729,10 @@ export class MaomaoQqConnector {
       const imageEnabled = models?.mediaChoice?.('image')?.enabled ?? Boolean(this.#imageGeneration);
       const voiceEnabled = models?.mediaChoice?.('voice')?.enabled ?? Boolean(this.#speech);
       const chatTools = test ? null : openChatTools({ current, signal, web: this.#ctx.get?.('web'), browser: this.#ctx.get?.('maomaoBrowser'),
+        // A line said before the media (e.g. while drawing); the model decides whether to use it.
+        say: peerTurn ? null : async (line) => {
+          if (!(await this.respond(envelope.receiptKey, line, { current, limit: 1 })).length) throw new Error('say_first_not_sent');
+        },
         learnProject: (data) => learning?.research(data),
         hasReference: !peerTurn && !quoted && source.senderId === envelope.senderId && Boolean(reference),
         image: imageEnabled ? async (args, toolSignal, publicReference) => {
@@ -716,19 +746,27 @@ export class MaomaoQqConnector {
           return this.#voiceReply(envelope, text, { key: speechKey }, current, speech, toolSignal);
         } : null,
       });
-      const learning = !test && !peerTurn && this.#config.ordinary?.enabled === true
-        ? this.#ctx.get?.('maomaoLearning')?.open({ namespace: 'qq', scope: qqMemoryScope(envelope),
-          subject: envelope.senderId, owner: this.#isOwner(envelope),
-          label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
-          // An image-only turn still gets the memory tools, so the model never meets an unknown tool.
-          text: envelope.text || (images.length || stickerImages.length ? '[图片]' : ''), sourceId: envelope.receiptKey, current, signal }) : null;
+      // A QQ private chat linked to a Lark / Telegram owner shares that owner's memory; otherwise memory stays per QQ chat.
+      const linkedOwner = !test && !peerTurn ? this.#linkedOwner(envelope) : null;
+      const ownerMemory = linkedOwner ? this.#ctx.get?.('maomaoPrivate')?.ownerMemory?.(linkedOwner, 'qq') : null;
+      if (linkedOwner) this.#ctx.get?.('maomaoPrivate')?.noteOwnerActivity?.(linkedOwner, envelope.text);
+      const learningText = envelope.text || (images.length || stickerImages.some((image) => !image.origin) ? '[图片]' : '');
+      const learning = !test && !peerTurn && (ownerMemory || this.#config.ordinary?.enabled === true)
+        ? this.#ctx.get?.('maomaoLearning')?.open(ownerMemory
+          ? { namespace: 'private', scope: ownerMemory.scope, subject: linkedOwner, owner: true, label: ownerMemory.label,
+            platform: ownerMemory.platform, text: learningText, sourceId: envelope.receiptKey, current, signal }
+          : { namespace: 'qq', scope: qqMemoryScope(envelope),
+            subject: envelope.senderId, owner: this.#isOwner(envelope),
+            label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
+            // An image-only turn still gets the memory tools, so the model never meets an unknown tool.
+            text: learningText, sourceId: envelope.receiptKey, current, signal }) : null;
       const learningService = this.#ctx.get?.('maomaoLearning');
       const stickerTools = !test && learningService?.settings.stickers === true && this.#config.stickers?.enabled !== false
         ? openStickerTools({ current: () => current() && learningService.settings.stickers === true, signal, images: stickerImages,
           collect: () => learningService.settings.collectStickers === true && this.#config.stickers?.collect !== false,
-          operate: (action, args) => {
+          operate: (action, { source: candidateSource, ...args }) => {
             this.#ordinary ??= new OrdinaryBridge(this.#workerOptions);
-            return this.#ordinary.media('sticker_tool', ['inspect', 'collect'].includes(action) ? visionSource : envelope, { action, ...args });
+            return this.#ordinary.media('sticker_tool', ['inspect', 'collect'].includes(action) ? candidateSource ?? visionSource : envelope, { action, ...args });
           },
           describe: async (jpeg, deadline) => {
             const adapter = models?.mediaChoice?.('vision')?.enabled ? await models.mediaAdapter('vision') : this.#stickers;
@@ -777,7 +815,11 @@ export class MaomaoQqConnector {
       });
       const { text: answer, options } = parseChoiceReply(reply ?? '');
       if (['sent', 'uncertain'].includes(chatTools?.outcome())) {
-        if (chatTools.outcome() === 'sent') learning?.finish({ answer: chatTools.transcript(), tools: chatTools.learningOutcomes() });
+        // The model may add a line after the image or voice; it decides, and an empty reply is fine.
+        const after = answer && current()
+          && (await this.respond(envelope.receiptKey, answer, { current, limit: envelope.scope === 'group' ? 2 : 3 }).catch(() => [])).length ? answer : '';
+        if (after) this.#recentReplies.set(chatKey, [...(this.#recentReplies.get(chatKey) ?? []), after].slice(-8));
+        if (chatTools.outcome() === 'sent') learning?.finish({ answer: [chatTools.transcript(), after].filter(Boolean).join('\n'), tools: chatTools.learningOutcomes() });
         return;
       }
       if (!current()) return;
@@ -809,6 +851,24 @@ export class MaomaoQqConnector {
     });
     if (test) void queued.then(() => test('interrupted'), () => test('interrupted'));
     return queued;
+  }
+
+  async #ambientStickers(envelope, source) {
+    if (envelope.scope !== 'group' || this.#ctx.get?.('maomaoLearning')?.settings.collectStickers !== true
+      || this.#config.stickers?.collect === false) return [];
+    const recent = [...this.#observed.values()].filter((item) => item.receiptKey !== source.receiptKey
+      && item.receiptKey !== envelope.receiptKey && !this.#stickerOffered.has(item.receiptKey)
+      && item.botId === envelope.botId && item.scope === 'group' && item.chatId === envelope.chatId
+      && Date.now() - item.receivedAt < 10 * 60_000 && !item.text?.trim()
+      && item.attachments.some((attachment) => attachment.kind === 'image' && attachment.sourceUrl)).slice(-2);
+    const found = [];
+    for (const item of recent) {
+      this.#stickerOffered.add(item.receiptKey);
+      if (this.#stickerOffered.size > 500) this.#stickerOffered.delete(this.#stickerOffered.values().next().value);
+      const [image] = await this.loadImages(item.receiptKey).catch(() => []);
+      if (image) found.push({ ...image, origin: item.senderId === envelope.senderId ? '这个人刚才发的' : '刚才群里有人发的', source: item });
+    }
+    return found;
   }
 
   async #generateImage(envelope, reference, current, generation, args, signal) {

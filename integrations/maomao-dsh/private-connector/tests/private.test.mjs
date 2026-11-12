@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { setTimeout as pause } from 'node:timers/promises';
 import { feishuInbound, telegramInbound } from '../identity.mjs';
-import { PrivateConnector, PRESET } from '../index.mjs';
+import { PrivateConnector, PRESET, privateService } from '../index.mjs';
 import { digest } from '../identity.mjs';
 import { PrivateLedger } from '../ledger.mjs';
 import { FeishuTransport, TelegramTransport } from '../transports.mjs';
@@ -24,6 +24,7 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
   const root = await mkdtemp(join(tmpdir(), 'maomao-private-test-'));
   const received = [];
   const prompts = [];
+  const sections = [];
   let nextSession = 0;
   const transport = { ready: () => true, async reply(event, text) {
     received.push({ platform: event.platform, messageId: event.messageId, text });
@@ -36,6 +37,8 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
       contextPressure: { pressureTokens: 320, contextWindow: 1000 } } }; },
     async state() { return { cursor: 0 }; },
     async prompt(value) { prompts.push(value); },
+    async resolveAgent(sessionId) { return { agent: { ctx: { get: (name) => name === 'systemPrompt'
+      ? { getSectionOrder: () => 0, section: (value) => { sections.push({ sessionId, text: value.text }); return () => {}; } } : undefined } } }; },
     async wait() { return { reason: 'idle', output: { records: [{ event: { type: 'assistant/message',
       data: { message: { content: [{ type: 'text', text: '猫猫记下啦。<|bubble|>喵。' }] } } } }] } }; },
   };
@@ -85,10 +88,13 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
     assert.equal(connector.accept(telegramInbound('2000', telegram(5, '你记得我喜欢什么吗？'))), true);
     await wait(5);
     assert.notEqual(prompts[0].sessionId, prompts[1].sessionId);
-    assert.match(prompts[1].content[0].text, /翠鸟/);
+    // Shared memory arrives in this turn's system section, not in the stored message.
+    const lastSection = (sessionId) => sections.filter((item) => item.sessionId === sessionId).at(-1)?.text ?? '';
+    assert.equal(prompts[1].content[0].text, '你记得我喜欢什么吗？');
+    assert.match(lastSection(prompts[1].sessionId), /本轮参考资料[\s\S]*翠鸟/);
     assert.equal(connector.accept(telegramInbound('2000', telegram(6, '你记得我喜欢什么吗？', 1002))), true);
     await wait(7);
-    assert.doesNotMatch(prompts[2].content[0].text, /翠鸟/);
+    assert.doesNotMatch(lastSection(prompts[2].sessionId), /翠鸟/);
     assert.equal(connector.accept(telegramInbound('2000', telegram(7, '/status'))), true);
     await wait(8);
     assert.match(received.at(-1).text, /google\/synthetic/);
@@ -537,7 +543,14 @@ test('a Lark or Telegram group switches on when its owner @-mentions the cat, la
     assert.match(prompts[0].content[0].text, /\[主人\] 猫猫来认识一下大家/);
     assert.match(prompts[1].content[0].text, /\[群友 [0-9a-f]{4}\] 你好呀/);
     assert.equal(sessions.length, 1, 'the group has its own single session');
-    const listed = connector.groups();
+    // The panel and the QQ connector reach these through the provided service, not the class.
+    const service = privateService(connector);
+    const listed = service.groups();
+    const ownerId = digest(['ordinary-owner', 'owner']);
+    assert.deepEqual(service.owners().map(({ id }) => id), [ownerId]);
+    assert.equal(service.noteOwnerActivity(ownerId, '在 QQ 聊着呢'), true);
+    assert.equal(service.noteOwnerActivity('z'.repeat(64), ''), false, 'unknown owners are ignored');
+    assert.equal(service.ownerMemory(ownerId, 'qq'), null, 'no shared memory when memory is off');
     assert.deepEqual(listed.groups.map(({ label, status }) => [label, status]), [['猫猫测试群', 'enabled']]);
     assert.equal(connector.groups({ action: 'set', key: listed.groups[0].key, status: 'disabled' }).status, 'saved');
     assert.equal(say('4', '1001', '还在吗'), false, 'a group switched off in the panel stays off, even for the owner');

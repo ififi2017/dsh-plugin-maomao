@@ -186,7 +186,7 @@ class MaomaoPanel extends TypertRemoteService {
     if (!['feishu', 'telegram', 'qq'].includes(platform) || !['start', 'current', 'read', 'confirm', 'cancel'].includes(action)
       || (['read', 'confirm', 'cancel'].includes(action) && (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)))
       || (action === 'confirm' && (typeof proof !== 'string' || !/^[a-f0-9]{8}$/.test(proof)))
-      || (owner && (platform === 'qq' || typeof owner !== 'string' || !/^[a-f0-9]{64}$/.test(owner)))
+      || (owner && ((platform === 'qq' && scope !== 'c2c') || typeof owner !== 'string' || !/^[a-f0-9]{64}$/.test(owner)))
       || (bindingId && (action !== 'start' || platform === 'qq' || !owner
         || typeof bindingId !== 'string' || !/^[a-f0-9]{64}$/.test(bindingId)))
       || (platform === 'qq' && action === 'start' && !['group', 'c2c', 'owner'].includes(scope))) return { status: 'invalid' };

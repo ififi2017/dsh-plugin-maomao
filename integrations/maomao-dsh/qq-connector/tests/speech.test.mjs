@@ -62,7 +62,8 @@ test('QQ voice reuses only a delivered same-speaker voice, and falls back before
         const outcome = await definitions.get('maomao_speak').execute({ text }, {
           agent: { id: 'voice-session' }, signal: AbortSignal.timeout(2000), concludeTurn() {},
         });
-        return outcome.status === 'unavailable' ? '这次语音没发出去，先给你文字版。' : 'duplicate';
+        // After a sent (or uncertain) voice this fake model chooses to say nothing more.
+        return outcome.status === 'unavailable' ? '这次语音没发出去，先给你文字版。' : '';
       } finally { close(); }
     } } });
   const deliver = async (messageId, content, senderId = 'member-a', groupOpenid = 'test-group', count = 1) => {

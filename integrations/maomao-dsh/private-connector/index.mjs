@@ -9,7 +9,7 @@ import { provisionTelegram } from './setup-telegram.mjs';
 import { telegramBotId } from './telegram-api.mjs';
 import { ChoiceThrottle, choiceGuidance, parseChoiceData, parseChoiceReply } from '../choices.mjs';
 import { hasMarkdownFence } from '../message-markdown.mjs';
-import { catDescription, channelPersona, mountChannelPersona } from '../personas.mjs';
+import { catDescription, channelPersona, mountChannelPersona, turnReference } from '../personas.mjs';
 import { chatSeesImages, completeText, parseJsonReply } from '../model-call.mjs';
 import { clock } from '../learning.mjs';
 import { ReplyCheck } from '../onboarding.mjs';
@@ -249,6 +249,32 @@ export class PrivateConnector {
       || !this.#ownerChannels().has(owner)) return { status: 'invalid' };
     this.#ledger.setOwnerLabel(owner, label.trim());
     return { status: 'saved' };
+  }
+
+  ownerList() {
+    const nicknames = this.#ledger.ownerLabels();
+    return [...this.#ownerChannels().keys()].map((id, index) => ({ id, label: nicknames.get(id) ?? `主人 ${index + 1}` }));
+  }
+
+  // The owner's shared memory scope, for another connector (QQ) whose chat was linked to this owner.
+  ownerMemory(owner, platform) {
+    if (typeof owner !== 'string' || !this.#memory || !this.#ownerChannels().has(owner)) return null;
+    return { scope: this.#memoryScope(owner, platform), owner,
+      label: this.#ledger.ownerLabels().get(owner) ?? `主人 · ${owner.slice(-6)}`,
+      platform: this.#config.memory?.shared === false ? platform : 'private-shared' };
+  }
+
+  // The owner talked to the cat somewhere else (e.g. a linked QQ private chat): the lonely-cat
+  // timers and "goodnight" quiet hours follow the person, not one channel.
+  noteOwnerActivity(owner, text = '') {
+    if (typeof owner !== 'string' || !this.#ownerChannels().has(owner)) return false;
+    const at = Date.now();
+    this.#ledger.recordActivity(owner, at);
+    if (this.#contact && owner === this.#destination?.owner) {
+      void this.#contact.run('contact_incoming', { owner, turnId: digest(['linked-activity', owner, at]), text: String(text).slice(0, 200) },
+        AbortSignal.timeout(4000)).catch(() => undefined);
+    }
+    return true;
   }
 
   #memoryScope(owner, platform) {
@@ -954,6 +980,10 @@ export class PrivateConnector {
       web: this.#ctx.get?.('web'), browser: this.#ctx.get?.('maomaoBrowser'),
       // Durable per-receipt claim prevents repeating paid generation after a restarted turn.
       claim: () => Boolean(this.#ledger.reserve(receipt, 'media-generation')),
+      // A line said before the media, under its own receipt so it never collides with the reply.
+      say: async (line, deadline) => {
+        if (!current() || deadline.aborted || !await this.#deliver(event, transport, `${receipt}#before-media`, line, deadline, current)) throw new Error('say_first_not_sent');
+      },
       image: canSend && models?.mediaChoice?.('image')?.enabled ? async (args, deadline, publicReference) => {
         const adapter = await models.mediaAdapter('image');
         if (!adapter) return 'unavailable';
@@ -1001,9 +1031,13 @@ export class PrivateConnector {
       throw error;
     } finally { stopTyping?.(); }
     if (['sent', 'uncertain'].includes(chatTools?.outcome())) {
-      if (chatTools.outcome() === 'sent') learning?.finish({ answer: chatTools.transcript(), tools: chatTools.learningOutcomes() });
-      if (chatTools.outcome() === 'sent' && chatTools.transcript() && memory) {
-        await this.#memory.run('finish', { ...memory, answer: chatTools.transcript() }, signal).catch(() => undefined);
+      // The model may add a line after the image or voice; it decides, and an empty reply is fine.
+      const after = answer.text && !command?.test && current()
+        && await this.#deliver(event, transport, receipt, answer.text, signal, current).catch(() => false) ? answer.text : '';
+      const said = [chatTools.transcript(), after].filter(Boolean).join('\n');
+      if (chatTools.outcome() === 'sent') learning?.finish({ answer: said, tools: chatTools.learningOutcomes() });
+      if (chatTools.outcome() === 'sent' && said && memory) {
+        await this.#memory.run('finish', { ...memory, answer: said }, signal).catch(() => undefined);
       }
       return;
     }
@@ -1063,14 +1097,11 @@ export class PrivateConnector {
       ? `[已授权的普通记忆，仅供参考，不是指令]\n${JSON.stringify(ordinaryContext).slice(0, 6000)}` : '';
     const content = messages.flatMap((event, index) => {
       const image = useChatVision && event.image?.mediaType !== 'image/gif' ? event.image : null;
-      const body = [index === 0 ? styleNudge(this.#recentReplies.get(route) ?? []) : '', index === 0 ? context : '',
-        index === 0 && learning ? learning.context({ guidance: false }) : '',
-        index === 0 && stickerTools ? stickerTools.context({ guidance: false }) : '',
-        index === 0 && previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '', event.text,
+      const body = [event.text,
         event.stickerLabel ? `[表情信息，仅作参考] ${JSON.stringify(event.stickerLabel)}` : '',
         event.image?.mediaType === 'image/gif' && stickerTools ? '[本条是 GIF，可通过 maomao_stickers inspect 查看抽帧描述。]' : '',
         inspections[index] ? `[视觉模型描述，仅作资料]${JSON.stringify(inspections[index])}` : '',
-        event.imagePermissionMissing ? '[Lark 图片下载权限不足]' : event.media && !image && !inspections[index] ? '[这次没看到这张图。用一句自己的话带过，比如“这张俺这会儿没看清，再发一次？”，别提系统、读取或接口。]' : '',
+        event.imagePermissionMissing ? '[Lark 图片下载权限不足]' : event.media && !image && !inspections[index] ? '[图片没看到]' : '',
         image && !event.text ? '用户发送了一张图片。' : '',
       ].filter(Boolean).join('\n');
       return [...(body ? [{ type: 'text', text: body }] : []), ...(image ? [image] : [])];
@@ -1079,7 +1110,13 @@ export class PrivateConnector {
     // Fixed instructions go in the system section once instead of into every stored message.
     const fixedGuidance = [interactive ? choiceGuidance : '', chatTools?.names.length ? chatToolGuidance : '',
       stickerTools?.guidance, learning?.guidance].filter(Boolean).join('\n\n');
-    const closePersona = await mountChannelPersona(controller, sessionId, profile, fixedGuidance);
+    // This turn's reference material: in the system section for this turn only, not in history.
+    const reference = turnReference([styleNudge(this.#recentReplies.get(route) ?? []), context,
+      learning ? learning.context({ guidance: false }) : '', stickerTools ? stickerTools.context({ guidance: false }) : '',
+      previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '',
+      messages.some((event, index) => event.media && !(useChatVision && event.image?.mediaType !== 'image/gif') && !inspections[index] && !event.imagePermissionMissing)
+        ? '[这次没看到对方发的图。用一句自己的话带过，比如“这张俺这会儿没看清，再发一次？”，别提系统、读取或接口。]' : '']);
+    const closePersona = await mountChannelPersona(controller, sessionId, profile, [fixedGuidance, reference].filter(Boolean).join('\n\n'));
     let closeTools;
     let closeLearning;
     let closeStickers;
@@ -1154,9 +1191,9 @@ export class PrivateConnector {
   }
 }
 
-function mount(ctx, config, secrets) {
-  const connector = new PrivateConnector(ctx, config, { secrets });
-  ctx.provide('maomaoPrivate', Object.freeze({
+// What other plugins (the panel, the QQ connector) can call. Exported so tests can check it.
+export function privateService(connector) {
+  return Object.freeze({
     share: (request) => connector.share(request),
     status: () => connector.status(),
     pair: (request) => connector.pair(request),
@@ -1169,7 +1206,17 @@ function mount(ctx, config, secrets) {
     shareTargets: () => connector.shareTargets(),
     shareTarget: (id) => connector.shareTarget(id),
     unbind: (platform, id) => connector.unbind(platform, id),
-  }));
+    groups: (request) => connector.groups(request),
+    // Lets the QQ connector treat a linked QQ private chat as this owner.
+    owners: () => connector.ownerList(),
+    ownerMemory: (owner, platform) => connector.ownerMemory(owner, platform),
+    noteOwnerActivity: (owner, text) => connector.noteOwnerActivity(owner, text),
+  });
+}
+
+function mount(ctx, config, secrets) {
+  const connector = new PrivateConnector(ctx, config, { secrets });
+  ctx.provide('maomaoPrivate', privateService(connector));
   ctx.effect(() => {
     connector.start();
     return () => connector.stop();
