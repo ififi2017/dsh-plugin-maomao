@@ -8,6 +8,11 @@ import { feishuInbound, telegramInbound } from '../identity.mjs';
 import { PrivateConnector, PRESET, privateService } from '../index.mjs';
 import { digest } from '../identity.mjs';
 import { PrivateLedger } from '../ledger.mjs';
+import { MoodBook } from '../../mood.mjs';
+
+// The mood reads the time of day (sleepy after midnight); pin it to mid-afternoon so these tests
+// do not depend on when they run.
+const daytimeMood = () => new MoodBook(null, { now: () => new Date().setHours(15, 0, 0, 0) });
 import { FeishuTransport, TelegramTransport } from '../transports.mjs';
 
 const feishu = (id, text, senderId = 'ou_owner', chatId = 'oc_owner', type = 'p2p') => ({
@@ -63,6 +68,7 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
       return { currentSelection: () => ({ provider: 'google', model: 'synthetic' }) };
     },
   }, config, {
+    mood: daytimeMood(),
     routes: new Map([['feishu', transport], ['telegram', transport]]),
   });
   const wait = async (count) => {
@@ -90,7 +96,8 @@ test('private admissions share ordinary owner memory and isolate sessions, accou
     assert.notEqual(prompts[0].sessionId, prompts[1].sessionId);
     // Shared memory arrives in this turn's system section, not in the stored message.
     const lastSection = (sessionId) => sections.filter((item) => item.sessionId === sessionId).at(-1)?.text ?? '';
-    assert.equal(prompts[1].content[0].text, '你记得我喜欢什么吗？');
+    // Each stored message starts with when it arrived.
+    assert.match(prompts[1].content[0].text, /^\[\d{1,2}月\d{1,2}日周. \d{2}:\d{2}\] 你记得我喜欢什么吗？$/);
     assert.match(lastSection(prompts[1].sessionId), /本轮参考资料[\s\S]*翠鸟/);
     assert.equal(connector.accept(telegramInbound('2000', telegram(6, '你记得我喜欢什么吗？', 1002))), true);
     await wait(7);
@@ -295,7 +302,7 @@ test('panel pairing verifies private ingress before linking a durable owner and 
   };
   const config = { stateRoot: root, feishu: { accountId: route.accountId },
     telegram: { accountId: '2000', debounceMs: 0 }, bindings: [{ owner: 'owner', endpoints: [route] }] };
-  const options = { routes: new Map([['feishu', transport], ['telegram', transport]]) };
+  const options = { routes: new Map([['feishu', transport], ['telegram', transport]]), mood: daytimeMood() };
   const ctx = { logger: {}, sessionController: { async create() { throw new Error('model unavailable'); } } };
   let connector = new PrivateConnector(ctx, config, options);
   const wait = async (count) => {
@@ -445,7 +452,7 @@ test('Telegram rapid text and image messages become one ordered model turn and o
   const connector = new PrivateConnector({ sessionController: controller }, {
     stateRoot: root, memory: { enabled: false }, telegram: { accountId: '2000', debounceMs: 120 },
     bindings: [{ owner: 'owner', endpoints: [endpoint] }],
-  }, { routes: new Map([['telegram', route]]) });
+  }, { routes: new Map([['telegram', route]]), mood: daytimeMood() });
   try {
     connector.accept({ ...endpoint, messageId: '1', text: '', media: { id: 'file1' }, receivedAt: Date.now() });
     connector.accept({ ...endpoint, messageId: '2', text: '看看这张图', receivedAt: Date.now() });
@@ -454,8 +461,12 @@ test('Telegram rapid text and image messages become one ordered model turn and o
     while (!replies.length && Date.now() < end) await pause(20);
     assert.deepEqual(replies, ['3']);
     assert.equal(prompts.length, 1);
-    assert.deepEqual(prompts[0].content, [{ type: 'text', text: '用户发送了一张图片。' }, image,
+    const untagged = prompts[0].content.map((part) => part.type === 'text'
+      ? { ...part, text: part.text.replace(/^\[[^\]]+\]\s*/, '') } : part);
+    assert.deepEqual(untagged, [{ type: 'text', text: '用户发送了一张图片。' }, image,
       { type: 'text', text: '看看这张图' }, { type: 'text', text: '只说主体' }]);
+    assert.match(prompts[0].content[0].text, /^\[\d{1,2}月\d{1,2}日周. \d{2}:\d{2}\]/);
+    assert.match(prompts[0].content[2].text, /^\[\d{2}:\d{2}\] 看看这张图$/);
   } finally { await connector.stop(); }
 });
 
@@ -528,7 +539,7 @@ test('a Lark or Telegram group switches on when its owner @-mentions the cat, la
   const connector = new PrivateConnector({ sessionController: controller }, {
     stateRoot: root, memory: { enabled: false }, telegram: { accountId: '2000', debounceMs: 0 },
     bindings: [{ owner: 'owner', endpoints: [dm] }],
-  }, { routes: new Map([['telegram', route]]) });
+  }, { routes: new Map([['telegram', route]]), mood: daytimeMood() });
   const say = (messageId, senderId, text) => connector.accept({ ...group, senderId, messageId, text, receivedAt: Date.now() });
   const settle = async (count) => { const end = Date.now() + 2000; while (replies.length < count && Date.now() < end) await pause(20); };
   try {

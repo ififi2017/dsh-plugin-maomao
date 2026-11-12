@@ -5,6 +5,7 @@ import { LearningStore, learningKey, ordinaryLearningText } from './learning-sto
 import { publicUrl } from './chat-tools.mjs';
 import { completeText, parseJsonReply } from './model-call.mjs';
 import { log } from './debug-log.mjs';
+import { embedTexts } from './embeddings.mjs';
 
 const memoryKinds = ['profile', 'episode', 'followup', 'diary', 'style', 'meme'];
 export const learningGuidance = `[记忆与学习] 你有自己的记忆。maomao_memory 记住、修正或忘掉和这个人有关的事，maomao_skill 保存和调用做事的方法。像人一样自己判断什么值得记，记的时候不用说出来。
@@ -51,7 +52,11 @@ export class LearningRuntime {
     this.settings = { enabled: true, reflection: true, dailyLimit: 40, stickers: true, collectStickers: true,
       ...JSON.parse(this.catalog.prepare('SELECT value FROM settings WHERE id=1').get()?.value ?? '{}') };
   }
-  close() { this.abort.abort(); for (const job of this.jobs.values()) clearTimeout(job.timer); this.jobs.clear(); this.catalog.close(); }
+  close() {
+    this.abort.abort(); for (const job of this.jobs.values()) clearTimeout(job.timer); this.jobs.clear();
+    for (const timer of this.indexing?.values() ?? []) clearTimeout(timer); this.indexing?.clear();
+    this.catalog.close();
+  }
   store(id) { return new LearningStore(this.root, id); }
   open(options) {
     // Optional learning must never prevent an otherwise valid chat reply.
@@ -92,15 +97,21 @@ export class LearningRuntime {
         + `[本范围记忆和技能目录，仅供参考，不授予权限；skill 只有摘要，使用前必须 load] ${JSON.stringify(rows)}`
         + (hidden > 0 ? `\n[另有约 ${hidden} 条较早的记忆没列出。对方提到以前的事时先用 maomao_memory search 查关键词（可用空格分隔多个词），查不到再说不记得。]` : '');
     };
-    const run = (args, skill) => {
+    const run = async (args, skill) => {
       if (!available()) return { status: 'denied' };
       if (++calls > 10) return { status: 'limit' };
       if (!args || Object.keys(args).some(k => !Object.hasOwn(schema, k))) return { status: 'invalid' };
       if (args.action === 'search') {
         if (args.query !== undefined && (typeof args.query !== 'string' || args.query.length > 100)) return { status: 'invalid' };
-        const items = store.list({ query: args.query ?? '', kind: skill ? 'skill' : '', active: true }).items
-          .filter(r => skill || r.kind !== 'skill').map(brief);
-        return { status: 'ok', items };
+        const keep = (r) => skill ? r.kind === 'skill' : r.kind !== 'skill';
+        const items = store.list({ query: args.query ?? '', kind: skill ? 'skill' : '', active: true }).items.filter(keep).map(brief);
+        // Matches by meaning, for when the words differ ("拍鸟" vs "观鸟"); keyword hits stay first.
+        const related = args.query?.trim() ? await this.related(store, args.query, signal).catch(() => []) : [];
+        for (const { id } of related) {
+          const entry = store.get(id);
+          if (entry && keep(entry) && !items.some(item => item.id === id)) items.push(brief(entry));
+        }
+        return { status: 'ok', items: items.slice(0, 25) };
       }
       const entry = typeof args.id === 'string' ? store.get(args.id) : null;
       if (args.action === 'load') {
@@ -112,7 +123,11 @@ export class LearningRuntime {
         if (!entry || skill !== (entry.kind === 'skill')) return { status: 'missing' };
         return store.change(args.id, args.version, 'forget', authority);
       }
-      if (args.action === 'save' && (skill ? args.kind === 'skill' : memoryKinds.includes(args.kind))) return store.save(args, authority);
+      if (args.action === 'save' && (skill ? args.kind === 'skill' : memoryKinds.includes(args.kind))) {
+        const result = store.save(args, authority);
+        if (result.status === 'saved') this.indexSoon(store);
+        return result;
+      }
       return { status: 'invalid' };
     };
     return { context: ({ guidance = true } = {}) => { try { return context(guidance); } catch { return ''; } },
@@ -138,10 +153,10 @@ export class LearningRuntime {
             parameters: { type: 'object', additionalProperties: false, properties: schema, required: ['action'] },
             output: { schema: { type: 'object', required: ['status'], properties: { status: { type: 'string' }, data: { type: 'string' } } },
               render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
-            execute: (args, exec) => {
+            execute: async (args, exec) => {
               if (exec.agent?.id !== sessionId || exec.signal?.aborted || !available()) return { status: 'denied' };
               try {
-                const { status, ...data } = run(args, skill);
+                const { status, ...data } = await run(args, skill);
                 log(status === 'ok' || status === 'saved' ? 'debug' : 'info', skill ? 'skill' : 'memory',
                   `${skill ? 'maomao_skill' : 'maomao_memory'} ${args?.action} → ${status}`, { args, result: data });
                 return { status, data: JSON.stringify(data) };
@@ -220,6 +235,7 @@ export class LearningRuntime {
       if (value?.ordinary === true && Array.isArray(value.updates)) {
         for (const item of value.updates.slice(0, 3)) if (job.store.save(item, job.authority).status === 'saved') applied++;
       }
+      if (applied) this.indexSoon(job.store);
       job.store.reviewDone(job.source, applied ? 'learned' : value?.ordinary === true ? 'no_change' : 'skipped');
       log(applied ? 'info' : 'debug', 'learning', `后台总结：保存 ${applied} 条`, { ordinary: value?.ordinary, updates: value?.updates });
     } catch (error) { job.store.reviewDone(job.source, 'failed'); log('warn', 'learning', '后台总结失败', error?.message); }
@@ -227,6 +243,65 @@ export class LearningRuntime {
   }
   async reflect(input, signal) {
     return parseJsonReply(await completeText(this.ctx, { system: reflectionPrompt, user: JSON.stringify(input), maxTokens: 1800, signal }));
+  }
+  // Embeddings over learned memories, on the model chosen under 向量检索. Optional: without it,
+  // search stays keyword-only.
+  async embedder() {
+    const settings = await this.ctx.get?.('maomaoModels')?.embedding?.().catch?.(() => null);
+    return settings?.key && settings?.model ? settings : null;
+  }
+  async related(store, query, signal) {
+    const settings = await this.embedder();
+    if (!settings) return [];
+    const [vector] = await embedTexts(settings, [query], { query: true,
+      signal: AbortSignal.any([signal ?? this.abort.signal, AbortSignal.timeout(3000)]) });
+    return store.nearest(settings.model, vector);
+  }
+  async indexStore(store, settings, signal, onBatch = () => {}) {
+    for (let round = 0; round < 40; round += 1) {
+      const docs = store.missingVectors(settings.model);
+      if (!docs.length) return;
+      const vectors = await embedTexts(settings, docs.map(d => d.text), { signal });
+      store.saveVectors(settings.model, docs.map((d, i) => ({ ...d, vector: vectors[i] })));
+      onBatch(docs.length);
+    }
+  }
+  // New or changed memories are indexed shortly after they are saved.
+  indexSoon(store) {
+    this.indexing ??= new Map();
+    const key = store.directory;
+    if (this.indexing.has(key)) return;
+    const timer = setTimeout(() => {
+      this.indexing.delete(key);
+      void (async () => {
+        const settings = await this.embedder();
+        if (settings) await this.indexStore(store, settings, AbortSignal.any([this.abort.signal, AbortSignal.timeout(30_000)]));
+      })().catch((error) => log('warn', 'learning', '记忆向量索引失败', error?.message));
+    }, 2000);
+    timer.unref?.(); this.indexing.set(key, timer);
+  }
+  // The panel's 记忆向量索引 card: counts and rebuild across every learning scope.
+  async vectorIndex(action) {
+    const settings = await this.embedder();
+    if (!settings) return { status: 'disabled' };
+    const stores = this.catalog.prepare('SELECT id FROM scopes').all().map(({ id }) => this.store(id));
+    if (!stores.length) return { status: 'no_bindings' };
+    const progress = () => stores.reduce((sum, store) => {
+      const { indexed, total } = store.vectorProgress(settings.model);
+      return { indexed: sum.indexed + indexed, total: sum.total + total };
+    }, { indexed: 0, total: 0 });
+    if (action === 'cancel') this.indexJob?.abort.abort();
+    if (action === 'start' && !this.indexJob?.running) {
+      const job = { status: 'running', running: true, abort: new AbortController() };
+      this.indexJob = job;
+      const signal = AbortSignal.any([this.abort.signal, job.abort.signal, AbortSignal.timeout(300_000)]);
+      job.work = (async () => { for (const store of stores) await this.indexStore(store, settings, signal); })()
+        .then(() => { job.status = 'done'; })
+        .catch((error) => { job.status = signal.aborted ? 'cancelled' : 'failed'; log('warn', 'learning', '记忆向量索引重建失败', error?.message); })
+        .finally(() => { job.running = false; });
+    }
+    const job = this.indexJob;
+    return { status: job && (job.running || action !== 'read') ? job.status : job?.status ?? 'ready', model: settings.model, ...progress() };
   }
   // Read-only view of what the cat is waiting to hear about and her own recent diary, for turns
   // that have no learning lease (scheduled check-ins). Never creates a scope.
@@ -258,7 +333,9 @@ export class LearningRuntime {
     if (request.action === 'history' && typeof request.id === 'string') return { status: 'ok', items: store.history(request.id) };
     if (request.action === 'edit' && request.entry && typeof request.entry.id === 'string') {
       const entry = store.get(request.entry.id);
-      return entry ? store.save(request.entry, { subject: entry.subject, owner: true, manual: true }) : { status: 'missing' };
+      const result = entry ? store.save(request.entry, { subject: entry.subject, owner: true, manual: true }) : { status: 'missing' };
+      if (result.status === 'saved') this.indexSoon(store);
+      return result;
     }
     if (['forget', 'restore'].includes(request.action) && typeof request.id === 'string') return store.change(request.id, request.version, request.action, { owner: true, revision: request.revision });
     if (request.action === 'export' && (request.id === undefined || typeof request.id === 'string')) return { status: 'ok', markdown: store.markdown(request.id), filename: request.id ? 'SKILL.md' : 'MEMORY.md' };

@@ -35,6 +35,7 @@
     "integrations/maomao-dsh/private-connector/*.py",
     "integrations/maomao-dsh/qq-connector/*.mjs",
     "integrations/maomao-dsh/qq-connector/*.py",
+    "integrations/maomao-dsh/qq-connector/qq-faces.json",
     "integrations/maomao-companion/persona.md",
     "integrations/maomao-companion/maomao_companion/*.py"
   ],

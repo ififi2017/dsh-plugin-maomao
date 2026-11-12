@@ -14,6 +14,7 @@ import { openStickerTools } from '../sticker-tools.mjs';
 import { qqMemoryScope } from '../learning-store.mjs';
 import { HarnessShadowJudge, archiveJudgeSessions } from './judge.mjs';
 import { chatWorkspace } from '../chat-workspace.mjs';
+import { MoodBook } from '../mood.mjs';
 import { qqCommand, qqPersonaReply, sidReply, statusReply } from './commands.mjs';
 import { GatewaySessionFile, gatewaySessionPath } from './gateway-session.mjs';
 import { GeminiImageGeneration, OpenAiImageGeneration } from './image-generation.mjs';
@@ -111,10 +112,12 @@ export class MaomaoQqConnector {
     const root = qqStorageHome(home, profileDocument ? dirname(profileDocument) : process.env.DSH_PROFILE_DIR);
     this.#storageHome = root;
     this.#dshHome = home;
-    this.#state = state ?? new ConnectorState(resolve(config.statePath ?? join(root, 'integrations', 'maomao-qq', 'state.json')));
+    const statePath = resolve(config.statePath ?? join(root, 'integrations', 'maomao-qq', 'state.json'));
+    this.#state = state ?? new ConnectorState(statePath);
     this.#chatFolder = chatWorkspace(ctx, { configured: config.workspace, home });
     this.#harness = harness ?? new HarnessConversation(ctx.sessionController, this.#state, {
       workspace: this.#chatFolder,
+      mood: new MoodBook(join(dirname(statePath), 'mood.json')),
       agentPreset: config.agentPreset,
     });
     const semanticJudge = config.shadow?.enabled === true
@@ -963,7 +966,7 @@ export class MaomaoQqConnector {
     const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
     const rows = (this.#steals.get(key) ?? []).filter((row) => Date.now() - row.at < 30 * 60_000);
     this.#steals.delete(key);
-    return rows.length ? `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用自己的话，像“这张我偷走啦”那样一句就够，可以带上打算什么时候用；别复述图的细节。]` : '';
+    return rows.length ? `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用你自己的说法，一句就够，可以带上打算什么时候用；图的细节大家都看见了，不用再讲。]` : '';
   }
 
   async #observeImage(envelope) {

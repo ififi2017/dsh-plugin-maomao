@@ -1,4 +1,4 @@
-"""Optional OpenRouter embeddings. No secrets, text logs or arbitrary endpoints."""
+"""Optional embeddings (OpenRouter, Google, OpenAI). No secrets, text logs or arbitrary endpoints."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -139,9 +139,41 @@ class GoogleEmbeddings:
         return [normalized(row["values"], self.dimensions) for row in rows]
 
 
+class OpenAIEmbeddings:
+    MODELS = {"openai/text-embedding-3-small", "openai/text-embedding-3-large"}
+    dimensions = 1024
+
+    def __init__(self, model, key_provider):
+        if model not in self.MODELS:
+            raise ValueError("unsupported embedding model")
+        self.model, self.key_provider = model, key_provider
+
+    def embed(self, texts, query=False, timeout=10):
+        if not isinstance(texts, list) or not 1 <= len(texts) <= 16 or any(not isinstance(t, str) or not t.strip() or len(t) > 600 for t in texts):
+            raise ValueError("embedding input exceeds bounds")
+        name = self.model.removeprefix("openai/")
+        payload = {"model": name, "input": texts, "dimensions": self.dimensions, "encoding_format": "float"}
+        request = urllib.request.Request("https://api.openai.com/v1/embeddings", data=json.dumps(payload).encode(),
+                    headers={"Authorization": "Bearer "+self.key_provider(self.model), "Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
+                raw = response.read(2_000_001)
+            if len(raw) > 2_000_000:
+                raise ValueError("embedding response too large")
+            rows = json.loads(raw)["data"]
+            if not isinstance(rows, list) or len(rows) != len(texts) or sorted(r.get("index") for r in rows) != list(range(len(texts))):
+                raise ValueError("embedding response indices mismatch")
+            return [normalized(row["embedding"], self.dimensions) for row in sorted(rows, key=lambda r: r["index"])]
+        except Exception:
+            # Provider errors may contain submitted text/headers. Expose a fixed error only.
+            raise RuntimeError("embedding request unavailable") from None
+
+
 def embedding_client(model, key_provider):
     if model == GoogleEmbeddings.model:
         return GoogleEmbeddings(key_provider)
+    if model in OpenAIEmbeddings.MODELS:
+        return OpenAIEmbeddings(model, key_provider)
     return OpenRouterEmbeddings(model=model, key_provider=key_provider)
 
 

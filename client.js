@@ -1008,12 +1008,12 @@ window.__ModuleLoader__.load({
         await poll(action);
         setBusy(false);
       }
-      const messages = { disabled: '在「模型与能力 → 向量检索」启用后可重建索引。', no_bindings: '当前没有已绑定的私聊。',
+      const messages = { disabled: '在「模型与能力 → 向量检索」启用后可重建索引。', no_bindings: '猫猫还没有记住任何内容。',
         failed: '重建中断，已写入的向量保留，可重试。', cancelled: '已取消，已写入的向量保留。',
         running: '正在重建…', done: '重建完成。', ready: '当前向量索引' };
       return h('section', { style: { ...sectionStyle, display: 'grid', gap: 9, fontSize: type.body } },
-        h('h3', { style: { margin: 0 } }, '私聊向量索引'),
-        h('p', { style: { margin: 0 } }, '重建会把当前已授权的普通记忆发给选定的 Embedding 服务，期间仍可使用本地检索。'),
+        h('h3', { style: { margin: 0 } }, '记忆向量索引'),
+        h('p', { style: { margin: 0 } }, '覆盖「自主学习」里猫猫记住的内容（各渠道），让她按意思也能找回旧记忆。新记住的内容会自动加入；换了 Embedding 模型后点重建。重建会把这些记忆发给选定的 Embedding 服务，期间仍可按关键词检索。'),
         value && h('p', { role: 'status', style: { margin: 0 } }, messages[value.status],
           Number.isInteger(value.total) && ` · ${value.indexed}/${value.total}`),
         h('div', { style: lineStyle }, button('重建向量索引', () => command('start'),

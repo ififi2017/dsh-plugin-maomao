@@ -33,7 +33,7 @@ test('prior image follows a same-chat quote or a recent unambiguous reference', 
   const onlyOtherMembers = [{ ...first, senderId: 'b' }, { ...first, senderId: 'c', receiptKey: 'another' }];
   assert.equal(recentImageFor(ask, onlyOtherMembers), null);
   const native = normalizeInbound(message('face', { raw: { content: '<faceType=3,faceId="9",ext="BAD">' } }), 0);
-  assert.equal(native.text, '[QQ 表情]');
+  assert.equal(native.text, '[QQ 表情：大哭]');
   assert.deepEqual(native.attachments, []);
 });
 

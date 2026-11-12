@@ -113,13 +113,13 @@ test('model discovery filters each provider by capability and keeps embedding ch
     assert.equal(url.href, 'https://api.openai.com/v1/models');
     assert.equal(headers.authorization, 'Bearer synthetic-openai-key');
     return Response.json({ data: [{ id: 'gpt-image-2' }, { id: 'gpt-image-1', shutdown_date: '2000-01-01' },
-      { id: 'gpt-4.1-mini' }, { id: 'gpt-4o-audio-preview' }] });
+      { id: 'gpt-4.1-mini' }, { id: 'gpt-4o-audio-preview' }, { id: 'text-embedding-3-small' }, { id: 'text-embedding-ada-002' }] });
   });
   for (const [role, expected] of Object.entries({
     image: { google: ['gemini-3-pro-image', 'gemini-3.1-flash-image'], openai: ['gpt-image-2'] },
     vision: { google: ['gemini-3.8-flash'], openai: ['gpt-4.1-mini'] },
     voice: { google: ['gemini-3.1-flash-tts-preview'] },
-    embedding: { google: ['google/gemini-embedding-001'], openrouter: ['baai/bge-m3'] },
+    embedding: { google: ['google/gemini-embedding-001'], openai: ['openai/text-embedding-3-small'], openrouter: ['baai/bge-m3'] },
   })) {
     assert.deepEqual(await manageMediaModel(ctx, { action: 'discover', role }), { status: 'ok',
       groups: Object.entries(expected).map(([provider, models]) => ({ provider, models, status: 'ok' })) });
