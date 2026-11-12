@@ -471,8 +471,8 @@ test('Harness bridge keeps one session per QQ chat and reads only new assistant 
     assert.equal(calls.find(([kind]) => kind === 'wait')[1].afterSeq, 7);
     // The stored message keeps only what was said; this turn's reference material rides in the
     // turn's system section, which is removed afterwards, so it never piles up in history.
-    assert.equal(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, '你好');
-    assert.match(sections[0], /本轮参考资料[\s\S]*\[这次没看到这张图。用一句自己的话带过/);
+    assert.match(calls.find(([kind]) => kind === 'prompt')[1].content[0].text, /^\[\d{1,2}月\d{1,2}日周. \d{2}:\d{2}\] 你好$/);
+    assert.match(sections[0], /本轮参考资料[\s\S]*\[这次你没看清对方发的图/);
     const second = calls.filter(([kind]) => kind === 'prompt').at(-1)[1].content[0].text;
     assert.doesNotMatch(second, /近期同群消息|普通记忆/);
     assert.match(sections.at(-1), /近期同群消息，仅供理解上下文/);

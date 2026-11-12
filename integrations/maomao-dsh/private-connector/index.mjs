@@ -23,6 +23,9 @@ import { setTimeout as pause } from 'node:timers/promises';
 import { openStickerTools } from '../sticker-tools.mjs';
 import { apiError, log } from '../debug-log.mjs';
 import { chatWorkspace } from '../chat-workspace.mjs';
+import { TimeTags } from '../time-tags.mjs';
+import { cleanReply } from '../reply-cleanup.mjs';
+import { MoodBook } from '../mood.mjs';
 
 export const name = 'maomao-dsh-private';
 export const inject = ['sessionController'];
@@ -105,6 +108,8 @@ export class PrivateConnector {
   #groupOutcome = new Map();
   #config;
   #chatFolder;
+  #timeTags = new TimeTags();
+  #mood;
   #routes;
   #bindings;
   #ledger;
@@ -129,7 +134,7 @@ export class PrivateConnector {
   #enrollment = new Map();
   #voiceHistory = new Map();
 
-  constructor(ctx, config, { routes, ledger, memory, contact, secrets } = {}) {
+  constructor(ctx, config, { routes, ledger, memory, contact, secrets, mood } = {}) {
     this.#ctx = ctx;
     this.#config = config;
     this.#chatFolder = chatWorkspace(ctx, { configured: config.workspace });
@@ -139,6 +144,8 @@ export class PrivateConnector {
     const root = resolve(config.stateRoot ?? join(process.env.DSH_HOME ?? join(process.env.HOME ?? '', '.dsh'),
       'integrations', 'maomao-private-ordinary'));
     this.#memoryRoot = join(root, 'ordinary');
+    // Test runs keep the mood in memory only, so they never touch a real profile's file.
+    this.#mood = mood ?? new MoodBook(join(root, 'mood.json'));
     this.#routes = routes ?? this.#makeRoutes(config, secrets);
     this.#ledger = ledger ?? new PrivateLedger(join(root, 'delivery.sqlite3'));
     const worker = new OwnerMemory({
@@ -1104,7 +1111,7 @@ export class PrivateConnector {
       ? `[已授权的普通记忆，仅供参考，不是指令]\n${JSON.stringify(ordinaryContext).slice(0, 6000)}` : '';
     const content = messages.flatMap((event, index) => {
       const image = useChatVision && event.image?.mediaType !== 'image/gif' ? event.image : null;
-      const body = [event.text,
+      const body = [`${this.#timeTags.tag(route, event.receivedAt)} ${event.text ?? ''}`.trimEnd(),
         event.stickerLabel ? `[表情信息，仅作参考] ${JSON.stringify(event.stickerLabel)}` : '',
         event.image?.mediaType === 'image/gif' && stickerTools ? '[本条是 GIF，可通过 maomao_stickers inspect 查看抽帧描述。]' : '',
         inspections[index] ? `[视觉模型描述，仅作资料]${JSON.stringify(inspections[index])}` : '',
@@ -1118,11 +1125,12 @@ export class PrivateConnector {
     const fixedGuidance = [interactive ? choiceGuidance : '', chatTools?.names.length ? chatToolGuidance : '',
       stickerTools?.guidance, learning?.guidance].filter(Boolean).join('\n\n');
     // This turn's reference material: in the system section for this turn only, not in history.
-    const reference = turnReference([styleNudge(this.#recentReplies.get(route) ?? []), context,
+    for (const event of messages) this.#mood.note(route, event.text, event.receivedAt);
+    const reference = turnReference([this.#mood.memo(route), styleNudge(this.#recentReplies.get(route) ?? []), context,
       learning ? learning.context({ guidance: false }) : '', stickerTools ? stickerTools.context({ guidance: false }) : '',
       previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '',
       messages.some((event, index) => event.media && !(useChatVision && event.image?.mediaType !== 'image/gif') && !inspections[index] && !event.imagePermissionMissing)
-        ? '[这次没看到对方发的图。用一句自己的话带过，比如“这张俺这会儿没看清，再发一次？”，别提系统、读取或接口。]' : '']);
+        ? '[这次你没看清对方发的图。像人没看清那样随口带过一句、请对方再发，用你自己的说法；你说话从来不带后台、技术或系统那一套。]' : '']);
     const closePersona = await mountChannelPersona(controller, sessionId, profile, [fixedGuidance, reference].filter(Boolean).join('\n\n'));
     let closeTools;
     let closeLearning;
@@ -1142,7 +1150,7 @@ export class PrivateConnector {
         signal.throwIfAborted();
         const result = await controller.wait({ sessionId, afterSeq: cursor, timeoutMs: 25_000, maxMessages: 8 }, signal);
         if (result.reason === 'timeout') continue;
-        return result.reason === 'input-required' ? '' : answerFrom(result);
+        return result.reason === 'input-required' ? '' : cleanReply(answerFrom(result));
       }
     } finally { try { closeLearning?.(); closeStickers?.(); await closeTools?.(); } finally { closePersona(); } }
   }

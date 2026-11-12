@@ -5,7 +5,8 @@ const catalog = {
   image: ['gemini-3.1-flash-image', 'gemini-3.1-flash-lite-image', 'gemini-3-pro-image',
     'gpt-image-2', 'gpt-image-2.6-sunburst', 'gpt-image-2.6-flare'],
   voice: ['gemini-3.8-flash-tts', 'gemini-3.8-flash-lite-tts'],
-  embedding: ['qwen/qwen3-embedding-8b', 'baai/bge-m3', 'google/gemini-embedding-001'],
+  embedding: ['qwen/qwen3-embedding-8b', 'baai/bge-m3', 'google/gemini-embedding-001',
+    'openai/text-embedding-3-small', 'openai/text-embedding-3-large'],
 };
 const voices = ['Aoede', 'Kore', 'Leda', 'Puck', 'Zephyr', 'Sulafat'];
 const credentials = {
@@ -19,8 +20,9 @@ const modelEntry = 'maomao-dsh-models';
 const modelId = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 const googleTts = /^gemini-.*-tts(?:-|$)/i;
 const roleProviders = { image: ['google', 'openai'], vision: ['google', 'openai'],
-  voice: ['google'], embedding: ['google', 'openrouter'] };
-const providerFor = (role, model) => role === 'embedding' && !model.startsWith('google/') ? 'openrouter'
+  voice: ['google'], embedding: ['google', 'openai', 'openrouter'] };
+const embeddingProvider = (model) => model.startsWith('google/') ? 'google' : model.startsWith('openai/') ? 'openai' : 'openrouter';
+const providerFor = (role, model) => role === 'embedding' ? embeddingProvider(model)
   : /^(?:gpt-|chatgpt-image-)/i.test(model) ? 'openai' : 'google';
 const officialHosts = { google: 'generativelanguage.googleapis.com', openai: 'api.openai.com', openrouter: 'openrouter.ai' };
 const mime = { png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp' };
@@ -81,10 +83,11 @@ function discoveredModel(role, provider, row) {
   const id = provider === 'google' ? row?.name?.replace?.(/^models\//, '') : row?.id;
   if (typeof id !== 'string') return null;
   if (role === 'embedding') {
-    const key = provider === 'google' ? `google/${id}` : id;
+    const key = provider === 'google' ? `google/${id}` : provider === 'openai' ? `openai/${id}` : id;
     if (provider === 'google' && Array.isArray(row.supportedGenerationMethods)
       && !row.supportedGenerationMethods.includes('embedContent') && !row.supportedGenerationMethods.includes('batchEmbedContents')) return null;
-    return catalog.embedding.includes(key) ? key : null;
+    // An id OpenRouter also lists (e.g. openai/…) belongs to the provider that serves it here.
+    return catalog.embedding.includes(key) && providerFor('embedding', key) === provider ? key : null;
   }
   if (!modelId.test(id)) return null;
   if (provider === 'google' && Array.isArray(row.supportedGenerationMethods)
@@ -168,6 +171,18 @@ async function testEmbedding(ctx, choice, signal) {
     });
     if (!response.ok) return { status: httpOutcome(response.status) };
     const vector = (await response.json())?.embeddings?.[0]?.values;
+    return vector?.length === 1024 && vector.every(Number.isFinite)
+      ? { status: 'tested', dimensions: vector.length } : { status: 'test_failed' };
+  }
+  if (provider === 'openai') {
+    const model = choice.model.slice('openai/'.length);
+    const response = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST', redirect: 'error', signal,
+      headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ model, input: ['猫猫的固定连接测试。'], dimensions: 1024, encoding_format: 'float' }),
+    });
+    if (!response.ok) return { status: httpOutcome(response.status) };
+    const vector = (await response.json())?.data?.[0]?.embedding;
     return vector?.length === 1024 && vector.every(Number.isFinite)
       ? { status: 'tested', dimensions: vector.length } : { status: 'test_failed' };
   }

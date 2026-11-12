@@ -54,3 +54,25 @@ test('mounting chat guidance for the default cat keeps her full persona in the r
   await mount(controller, 's', { name: '小狗', prompt: '你是小狗。' }, '');
   assert.doesNotMatch(sections[1].text, /河南猫娘/, 'a custom persona replaces the cat');
 });
+
+test('message time tags: full date after a new day or long gap, time otherwise, never echoed back', async () => {
+  const { timeTag, stripTimeTag, TimeTags } = await import('../integrations/maomao-dsh/time-tags.mjs');
+  const previousTz = process.env.TZ;
+  process.env.TZ = 'Asia/Taipei';
+  try {
+    const at = Date.parse('2026-11-12T22:51:00+08:00');
+    assert.equal(timeTag(at), '[11月12日周四 22:51]');
+    assert.equal(timeTag(at, at - 60_000), '[22:51]');
+    assert.equal(timeTag(at, at - 4 * 3600_000), '[11月12日周四 22:51]');
+    assert.equal(timeTag(at + 2 * 3600_000, at), '[11月13日周五 00:51]');
+    const tags = new TimeTags();
+    assert.equal(tags.tag('chat-a', at), '[11月12日周四 22:51]');
+    assert.equal(tags.tag('chat-a', at + 60_000), '[22:52]');
+    assert.equal(tags.tag('chat-b', at + 60_000), '[11月12日周四 22:52]');
+    assert.equal(stripTimeTag('[22:51] 早呀'), '早呀');
+    assert.equal(stripTimeTag('[11月12日周四 22:51]你好'), '你好');
+    assert.equal(stripTimeTag('[表情] 你好'), '[表情] 你好');
+  } finally {
+    if (previousTz === undefined) delete process.env.TZ; else process.env.TZ = previousTz;
+  }
+});

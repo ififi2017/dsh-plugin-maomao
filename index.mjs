@@ -133,7 +133,8 @@ class MaomaoPanel extends TypertRemoteService {
     requireOwner(this.ctx);
     const { action } = request ?? {};
     if (!['start', 'read', 'cancel'].includes(action)) return { status: 'invalid' };
-    return this.ctx.get('maomaoPrivate')?.vectorIndex?.(action) ?? { status: 'disabled' };
+    // The index covers 猫猫's learned memories (自主学习), the store her memory search reads.
+    return this.ctx.get('maomaoLearning')?.vectorIndex?.(action) ?? { status: 'disabled' };
   }
 
   memorySettings(request, signal) {

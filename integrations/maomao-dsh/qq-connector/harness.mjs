@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { TimeTags } from '../time-tags.mjs';
+import { MoodBook } from '../mood.mjs';
+import { cleanReply } from '../reply-cleanup.mjs';
 import { mountChannelPersona, turnReference } from '../personas.mjs';
 import { choiceGuidance } from '../choices.mjs';
 import { chatToolGuidance } from '../chat-tools.mjs';
@@ -41,8 +44,12 @@ export class HarnessConversation {
   #workspace;
   #preset;
   #sessionCreating = new Map();
+  #timeTags = new TimeTags();
 
-  constructor(controller, state, { workspace, agentPreset } = {}) {
+  #mood;
+
+  constructor(controller, state, { workspace, agentPreset, mood = new MoodBook() } = {}) {
+    this.#mood = mood;
     this.#controller = controller;
     this.#state = state;
     // A plain folder or a chat-workspace handle ({ folder, holds }) from chat-workspace.mjs.
@@ -120,14 +127,19 @@ export class HarnessConversation {
     const ownLines = recentReplies.length ? recentReplies : recent.filter((row) => row.role === 'assistant').map((row) => row.text);
     const unseenImages = !images.length && !imageExpected && recent.some((row) => row.role === 'user' && /\[图片\]/.test(row.text ?? ''))
       ? '[近期群消息里的图片这次没有给你看。别说图片加载失败；真要看的话，请对方@你时附上图。]' : '';
-    const reference = turnReference([passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
+    const moodKey = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
+    if (!peerTurn && text) this.#mood.note(moodKey, text, envelope.receivedAt);
+    const moodLine = this.#mood.memo(moodKey, { group: envelope.scope === 'group' });
+    const reference = turnReference([moodLine, passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
       ambientText, memoryText, learning?.context({ guidance: false }),
       imageExpected && !images.length && !imageDescription
-        ? '[这次没看到这张图。用一句自己的话带过，比如“这张俺这会儿没看清，再发一次？”，别提系统、读取、加载或接口，也别反复解释。]' : unseenImages]);
-    const promptText = [currentText, transcript ? `[语音转写] ${transcript}` : '',
+        ? '[这次你没看清对方发的图。像人没看清那样随口带过一句、请对方再发，用你自己的说法；你说话从来不带后台、技术或系统那一套。]' : unseenImages]);
+    const said = [currentText, transcript ? `[语音转写] ${transcript}` : '',
       imageHint,
       imageDescription ? `[图片的识别摘要，可能有误，只是资料] ${JSON.stringify(imageDescription)}` : '',
       !text && images.length ? '用户发送了图片。' : ''].filter(Boolean).join('\n');
+    const promptText = said || images.length
+      ? `${this.#timeTags.tag(`${envelope.botId}:${envelope.scope}:${envelope.chatId}`, envelope.receivedAt)} ${said}`.trimEnd() : '';
     const sessionId = await this.#sessionFor(envelope, profile, signal);
     if (profile && !profile.current()) return '';
     await models?.useChat?.(this.#controller, sessionId);
@@ -146,7 +158,7 @@ export class HarnessConversation {
       const content = [...(promptText ? [{ type: 'text', text: promptText }] : []), ...images];
       const first = await this.#prompt(sessionId, content, signal);
       await this.#state.noteSessionTurn?.(envelope.botId, envelope.scope, envelope.chatId, sessionId)?.catch?.(() => undefined);
-      return first.text;
+      return cleanReply(first.text);
     } finally {
       try { await Promise.allSettled(closeTools.map(async (close) => close?.())); } finally { closePersona(); }
     }

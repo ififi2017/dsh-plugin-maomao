@@ -27,6 +27,7 @@ export class LearningStore {
       CREATE TABLE IF NOT EXISTS evidence_origins(id TEXT PRIMARY KEY, kind TEXT NOT NULL, links TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY, at INTEGER NOT NULL, outcome TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS entry_subject ON entries(subject,status);
+      CREATE TABLE IF NOT EXISTS vectors(id TEXT PRIMARY KEY, model TEXT NOT NULL, signature TEXT NOT NULL, vector TEXT NOT NULL);
     `));
     chmodSync(this.path, 0o600);
   }
@@ -124,6 +125,34 @@ export class LearningStore {
       this.write(db, { ...next, status: action === 'forget' ? 'forgotten' : next.status, version: row.version + 1, updated: this.clock() });
       return { status: 'saved' };
     });
+  }
+  // Vector index over active entries. A vector counts only for the current model and the
+  // entry's current text, so an edit or a model switch re-indexes that entry.
+  vectorDocs() {
+    return this.db(db => db.prepare("SELECT id,kind,title,body FROM entries WHERE status='active' AND (expires IS NULL OR expires>?)").all(this.clock()))
+      .map(row => { const text = `${row.title}。${row.body}`.slice(0, 1500); return { id: row.id, text, signature: learningKey(text) }; });
+  }
+  vectorProgress(model) {
+    const docs = this.vectorDocs();
+    const saved = new Map(this.db(db => db.prepare('SELECT id,signature FROM vectors WHERE model=?').all(model)).map(r => [r.id, r.signature]));
+    return { total: docs.length, indexed: docs.filter(d => saved.get(d.id) === d.signature).length };
+  }
+  missingVectors(model, limit = 16) {
+    const saved = new Map(this.db(db => db.prepare('SELECT id,signature FROM vectors WHERE model=?').all(model)).map(r => [r.id, r.signature]));
+    return this.vectorDocs().filter(d => saved.get(d.id) !== d.signature).slice(0, limit);
+  }
+  saveVectors(model, rows) {
+    this.transaction(db => {
+      for (const { id, signature, vector } of rows) db.prepare('INSERT OR REPLACE INTO vectors VALUES (?,?,?,?)').run(id, model, signature, JSON.stringify(vector));
+      db.prepare("DELETE FROM vectors WHERE id NOT IN (SELECT id FROM entries WHERE status='active')").run();
+    });
+  }
+  nearest(model, query, { limit = 5, threshold = 0.5 } = {}) {
+    const docs = new Map(this.vectorDocs().map(d => [d.id, d]));
+    return this.db(db => db.prepare('SELECT id,signature,vector FROM vectors WHERE model=?').all(model))
+      .filter(r => docs.get(r.id)?.signature === r.signature)
+      .map(r => ({ id: r.id, score: JSON.parse(r.vector).reduce((sum, x, i) => sum + x * query[i], 0) }))
+      .filter(r => r.score >= threshold).sort((a, b) => b.score - a.score).slice(0, limit);
   }
   history(id) { return this.db(db => db.prepare('SELECT snapshot FROM revisions WHERE id=? ORDER BY version DESC LIMIT 20').all(id).map(r => JSON.parse(r.snapshot))); }
   claimReview(id, limit) {

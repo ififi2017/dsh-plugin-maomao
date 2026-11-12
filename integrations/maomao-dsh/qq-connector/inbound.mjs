@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { hasMarkdownBlock, hasMarkdownFence } from '../message-markdown.mjs';
 const NON_EMPTY = (value) => typeof value === 'string' ? value.trim() : '';
 const LEADING_MENTION = /^<@!?([A-Za-z0-9_-]{1,128})>\s*/;
@@ -88,6 +89,12 @@ function stripLeadingBotMention(message, text, botId) {
   return text;
 }
 
+// QQ faces arrive as IDs. Naming them lets the model know which face was sent ([QQ 表情：旺柴]).
+// Names from dafeiyu-astrbot's face_map.json (MIT), keyed by the QQ face ID.
+const QQ_FACES = JSON.parse(readFileSync(new URL('./qq-faces.json', import.meta.url), 'utf8'));
+const faceText = (id) => QQ_FACES[id] ? `[QQ 表情：${QQ_FACES[id]}]` : '[QQ 表情]';
+const rawFaces = (raw) => [...raw.matchAll(/\[<face,id=(\d+)\/?>\]|<faceType=\d+,faceId="?(\d+)/g)].map((m) => faceText(m[1] ?? m[2])).join('');
+
 export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
   if (!message || !['group', 'c2c'].includes(message.kind) || message.senderIsBot === true) return null;
   const messageId = NON_EMPTY(message.messageId);
@@ -120,8 +127,8 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
     addressed,
     addressedToOther,
     text: (body
-      .replace(/<faceType=\d+,faceId="[^"]*",ext="[^"]*">/g, '[QQ 表情]')
-      || (/\[<face,id=\d+\/?>\]|<faceType=\d+,faceId=/.test(message.raw?.content ?? '') ? '[QQ 表情]' : ''))
+      .replace(/<faceType=\d+,faceId="([^"]*)",ext="[^"]*">/g, (_, id) => faceText(id))
+      || rawFaces(message.raw?.content ?? ''))
       .slice(0, 12000),
     attachments: Object.freeze(attachments),
     quotedImages: Object.freeze(quotedImages(message, replyIndex)),
