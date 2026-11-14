@@ -1094,7 +1094,9 @@ export class PrivateConnector {
       const cwd = await this.#chatFolder.folder();
       const result = await controller.create({ agentPreset: PRESET, ...(cwd ? { cwd } : {}) });
       await this.#chatFolder.attach(result.sessionId);
-      sessionId = this.#ledger.bind(route, result.sessionId);
+      // rebind, not bind: a chat moving off an old session must not stay bound to it (an old
+      // session may be archived, and DSH blocks archived sessions, so every reply came back empty).
+      sessionId = this.#ledger.rebind(route, result.sessionId);
     }
     const projection = await controller.projections({ sessionId }, signal);
     if (projection?.values?.agentPreset !== PRESET) {

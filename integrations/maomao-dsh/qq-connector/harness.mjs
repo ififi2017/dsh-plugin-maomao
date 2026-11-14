@@ -88,7 +88,7 @@ export class HarnessConversation {
     return this.#sessionCreating.get(key);
   }
 
-  async ask(envelope, { replyForm = null, images = [], imageDescription, referencedImage = null, ambient = [], ordinaryContext = null, passive = false, owner = false, models,
+  async ask(envelope, { replyForm = null, selfName = '', images = [], imageDescription, referencedImage = null, ambient = [], ordinaryContext = null, passive = false, owner = false, models,
     voice = null, chatTools = null, stickerTools = null, groupTools = null, learning = null, profile, peerTurn = null, choices = false, recentReplies = [],
     signal = AbortSignal.timeout(120_000) } = {}) {
     const text = peerTurn ? '' : envelope.text.trim();
@@ -135,7 +135,8 @@ export class HarnessConversation {
     if (group && !peerTurn) this.#mood.acquaint(moodKey, envelope.senderId, envelope.receivedAt);
     const moodLine = this.#mood.memo(moodKey, { group });
     const toneLine = group && !peerTurn && !owner ? this.#mood.familiarity(moodKey, envelope.senderId) : '';
-    const reference = turnReference([moodLine, toneLine, this.#mood.repeatNudge(moodKey), passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
+    const nameLine = group && selfName ? `[你在这个群里显示的名字是「${selfName}」，群友这么叫你就是在叫你；群里别的机器人哪怕也叫猫猫，也是别人。]` : '';
+    const reference = turnReference([nameLine, moodLine, toneLine, this.#mood.repeatNudge(moodKey), passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
       ambientText, memoryText, learning?.context({ guidance: false }),
       imageExpected && !images.length && !imageDescription
         ? '[这次你没看清对方发的图。像人没看清那样随口带过一句、请对方再发，用你自己的说法；你说话从来不带后台、技术或系统那一套。]' : unseenImages]);

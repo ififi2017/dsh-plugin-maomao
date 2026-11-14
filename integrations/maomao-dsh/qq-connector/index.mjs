@@ -76,6 +76,7 @@ export class MaomaoQqConnector {
   #stickerOffered = new Set();
   #steals = new Map();
   #stealNoticeDelayMs = 15_000;
+  #shownImages = new Set();
   #dshHome = '';
   #chatFolder;
   #imageInFlight = new Map();
@@ -346,21 +347,32 @@ export class MaomaoQqConnector {
 
   peerGroups() {
     return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
-      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId),
+      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId), selfName: this.#groupSelfName(groupOpenId),
         passive: typeof this.#state.peerSettings(this.#appId, groupOpenId)?.passive === 'boolean'
           ? this.#state.peerSettings(this.#appId, groupOpenId).passive : this.#groupPassive(groupOpenId) }));
   }
 
-  async savePeerGroup({ id, enabled, maxRounds, paused, passive }) {
+  // 猫猫's display name in a group (e.g. "猫猫 2 号" beside another bot called 猫猫): the panel
+  // setting once saved, else the older shadow.delivery.peers[group].selfName config.
+  #groupSelfName(chatId) {
+    const saved = this.#state.peerSettings(this.#appId, chatId)?.selfName;
+    if (typeof saved === 'string') return saved;
+    const legacy = this.#config.shadow?.delivery?.peers?.[chatId]?.selfName;
+    return typeof legacy === 'string' ? legacy.trim().slice(0, 24) : '';
+  }
+
+  async savePeerGroup({ id, enabled, maxRounds, paused, passive, selfName }) {
     const group = this.personaTargets().find((target) => target.id === id && target.kind === 'qq-group');
     if (!group?.groupOpenId || !this.#shadow) return { status: 'unavailable' };
     if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5
-      || (passive !== undefined && typeof passive !== 'boolean')) {
+      || (passive !== undefined && typeof passive !== 'boolean')
+      || (selfName !== undefined && (typeof selfName !== 'string' || selfName.length > 24 || /[\x00-\x1f<>]/.test(selfName)))) {
       return { status: 'invalid' };
     }
     this.#shadow.cancelPeer({ botId: this.#appId, chatId: group.groupOpenId });
     await this.#state.savePeerSettings(this.#appId, group.groupOpenId, {
       enabled, paused, maxRounds, ...(passive !== undefined ? { passive } : {}),
+      ...(selfName !== undefined ? { selfName: selfName.trim() } : {}),
     });
     return { status: 'saved' };
   }
@@ -708,8 +720,13 @@ export class MaomaoQqConnector {
       }
       // When the question has no picture of its own, look at what the same person just posted.
       const recentImages = !test && !peerTurn && !linkedImage && !inboundImage(envelope)
-        ? recentImagesFrom(envelope, this.#observed.values(), 3) : [];
+        ? recentImagesFrom(envelope, this.#observed.values(), 3, 120_000, { shown: this.#shownImages }) : [];
       linkedImage ??= recentImages.at(-1) ?? null;
+      // Remember which pictures a turn has already looked at, so they are not attached again.
+      for (const seen of [envelope, linkedImage, ...recentImages]) {
+        if (seen?.receiptKey && inboundImage(seen)) this.#shownImages.add(seen.receiptKey);
+      }
+      if (this.#shownImages.size > 500) this.#shownImages.delete(this.#shownImages.values().next().value);
       const source = linkedImage ?? envelope;
       const attachment = inboundImage(source);
       const quoted = !peerTurn && attachment && source.quotedImages?.includes(attachment);
@@ -817,6 +834,7 @@ export class MaomaoQqConnector {
       if (!test && !peerTurn && envelope.scope === 'c2c') void this.#typing(envelope);
       const reply = await this.#harness.ask(envelope, {
         replyForm,
+        selfName: envelope.scope === 'group' ? this.#groupSelfName(envelope.chatId) : '',
         images,
         imageDescription,
         referencedImage: linkedImage ? { sameSender: linkedImage.senderId === envelope.senderId }

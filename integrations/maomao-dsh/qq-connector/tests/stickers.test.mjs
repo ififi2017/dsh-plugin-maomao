@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { normalizeInbound, recentImageFor } from '../inbound.mjs';
+import { normalizeInbound, recentImageFor, recentImagesFrom } from '../inbound.mjs';
 import { MaomaoQqConnector } from '../index.mjs';
 import { OrdinaryBridge } from '../ordinary.mjs';
 import { StickerIntelligence } from '../stickers.mjs';
@@ -154,4 +154,21 @@ test('a message of only a QQ store sticker is not empty: it reads as a QQ face, 
   assert.equal(store(Buffer.from(JSON.stringify({ text: '[狗头保命]' })).toString('base64')).text, '[QQ 表情：狗头保命]');
   const known = normalizeInbound(message('face', { content: '', raw: { content: '[<face,id=178/>]' } }), 0, 'bot-a');
   assert.equal(known.text, '[QQ 表情：斜眼笑]');
+});
+
+test('a picture rides along with a follow-up question once, and plain remarks do not drag old pictures or stickers in', () => {
+  const at = (id, seconds, options = {}) => normalizeInbound(message(id, options), 1_000_000 + seconds * 1000, 'bot-a');
+  const screenshot = at('shot', 0, { attachments });
+  const sticker = at('sticker', 50, { attachments, content: '【表情: 未知表情】' });
+  const receipts = [screenshot, sticker];
+  // "Picture, then 分析下" picks up the screenshot.
+  assert.deepEqual(recentImagesFrom(at('ask', 20, { content: '出来分析下' }), receipts).map((r) => r.messageId), ['shot']);
+  // An unrelated remark soon after an unanswered picture still gets it; a minute later it does not.
+  assert.deepEqual(recentImagesFrom(at('remark', 30, { content: '你 tm' }), [screenshot]).map((r) => r.messageId), ['shot']);
+  assert.deepEqual(recentImagesFrom(at('later', 70, { content: '你 tm' }), [screenshot]), []);
+  // A sticker is not "the picture you mean" unless the line points at it.
+  assert.deepEqual(recentImagesFrom(at('next', 55, { content: '怎么又扎心' }), [sticker]), []);
+  assert.deepEqual(recentImagesFrom(at('about', 55, { content: '这张啥意思' }), [sticker]).map((r) => r.messageId), ['sticker']);
+  // Once a turn has looked at a picture it is not attached again.
+  assert.deepEqual(recentImagesFrom(at('again', 25, { content: '分析下' }), receipts, 3, 120_000, { shown: new Set([screenshot.receiptKey]) }), []);
 });

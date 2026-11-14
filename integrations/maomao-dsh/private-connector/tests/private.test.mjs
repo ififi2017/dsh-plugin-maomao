@@ -588,3 +588,60 @@ test('the Telegram transport reports privacy mode from getMe and whether group m
   assert.equal(transport.groupCheck.readAll, false);
   assert.equal(transport.groupCheck.last.reason, 'not_addressed');
 });
+
+test('a chat whose session predates the 猫猫的聊天 folder moves to a new session and stays there', async (t) => {
+  const { mkdir, writeFile } = await import('node:fs/promises');
+  const { zstdCompressSync } = await import('node:zlib');
+  const root = await mkdtemp(join(tmpdir(), 'maomao-private-move-'));
+  const home = join(root, 'dsh-home');
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previousHome;
+    await rm(root, { recursive: true, force: true });
+  });
+  const folder = join(home, 'integrations', 'maomao-chats');
+  // Session headers as DSH writes them: the first session ran in the old folder, later ones in the chat folder.
+  const header = async (id, cwd) => {
+    await mkdir(join(home, 'sessions', 'any', id), { recursive: true });
+    await writeFile(join(home, 'sessions', 'any', id, 'session.v4.jsonl.zstd'),
+      zstdCompressSync(Buffer.from(`${JSON.stringify({ type: 'session', id, cwd })}\n`)));
+  };
+  let created = 0;
+  const prompts = [];
+  const replies = [];
+  const controller = {
+    async create() {
+      const id = `session-${++created}`;
+      await header(id, created === 1 ? join(home, 'profiles', 'desktop') : folder);
+      return { sessionId: id };
+    },
+    async projections() { return { values: { agentPreset: PRESET, modelSelection: { next: { provider: 'google' } } } }; },
+    async state() { return { cursor: 0 }; },
+    async prompt(request) { prompts.push(request.sessionId); },
+    async wait() { return { reason: 'idle', output: { records: [{ event: { type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: '在呢。' }] } } } }] } }; },
+  };
+  const endpoint = { platform: 'telegram', accountId: '2000', chatId: '1001', senderId: '1001' };
+  const route = { async reply(event) { replies.push(event.messageId); return '90'; } };
+  const ctx = { sessionController: controller,
+    get: (name) => name === 'workspaceRegistry' ? { async create() { return { async attachSession() {} }; } } : undefined };
+  const connector = new PrivateConnector(ctx, { stateRoot: root, memory: { enabled: false },
+    telegram: { accountId: '2000', debounceMs: 0 }, bindings: [{ owner: 'owner', endpoints: [endpoint] }],
+  }, { routes: new Map([['telegram', route]]), mood: daytimeMood() });
+  const say = async (id) => {
+    connector.accept({ ...endpoint, messageId: id, text: '在吗', receivedAt: Date.now() });
+    const end = Date.now() + 2000;
+    while (!replies.includes(id) && Date.now() < end) await pause(20);
+  };
+  try {
+    await say('1');
+    await say('2');
+    await say('3');
+    // Turn 1 created session-1, which turned out to live in the old folder. Turn 2 moved the chat to
+    // session-2 in the chat folder; turn 3 stays there instead of creating yet another session.
+    assert.deepEqual(prompts, ['session-1', 'session-2', 'session-2']);
+    assert.equal(created, 2);
+    assert.deepEqual(replies, ['1', '2', '3']);
+  } finally { await connector.stop(); }
+});

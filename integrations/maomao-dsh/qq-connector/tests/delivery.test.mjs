@@ -297,3 +297,23 @@ test('the panel 主动接话 switch turns unprompted replies on for a group outs
       assert.equal(sends.length, 1);
     });
 });
+
+test('猫猫 learns its own group display name from the panel and hears it in group turns', { timeout: 10_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope, options) { asked.push(options); return '中'; } };
+  await withConnector({ enabled: true, groupAllowlist: ['test-group'] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('first'));
+      await firstSend;
+      assert.equal(asked[0].selfName, '');
+      const [group] = connector.peerGroups();
+      assert.equal((await connector.savePeerGroup({ ...group, selfName: ' 猫猫 2 号 ' })).status, 'saved');
+      assert.equal(connector.peerGroups()[0].selfName, '猫猫 2 号');
+      assert.equal((await connector.savePeerGroup({ ...group, selfName: '<b>' })).status, 'invalid');
+      await connector.accept(inbound('second'));
+      // A follow-up right after 猫猫 spoke is judged after a short gap (about 4 s).
+      const end = Date.now() + 7000;
+      while (asked.length < 2 && Date.now() < end) await delay(50);
+      assert.equal(asked[1]?.selfName, '猫猫 2 号');
+    });
+});

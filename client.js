@@ -565,12 +565,17 @@ window.__ModuleLoader__.load({
           const result = await invoke('qqPeerSettings', { request: value });
           if (result.status === 'saved') { clearDraft(); onChange(); }
           setNotice(result.status === 'saved' ? '已保存。'
-            : result.status === 'invalid' ? '请检查轮数设置。' : '当前群设置不可用。');
+            : result.status === 'invalid' ? '请检查轮数和名字（最多 24 个字）。' : '当前群设置不可用。');
         } catch { setNotice('保存失败，请重试。'); }
         finally { setBusy(false); }
       }
       return h('div', { style: { display: 'grid', gap: 8 } },
         h('p', { style: { margin: 0 } }, '被 @ 或引用时猫猫总会回复。下面两项决定没被 @ 时，要不要让模型参考同群上下文和 QQ 普通记忆，自己判断接不接话。'),
+        h('label', { style: lineStyle }, '猫猫在这个群里的名字',
+          h('input', { type: 'text', value: value.selfName ?? '', maxLength: 24, placeholder: '和 QQ 群里显示的一致，例如 猫猫 2 号',
+            style: { ...inputStyle, minWidth: 200 }, disabled: busy, 'aria-label': '猫猫在这个群里的名字',
+            onChange: (event) => update('selfName', event.target.value) })),
+        h('p', { style: mutedStyle }, '群友这样称呼时，猫猫就知道是在叫自己。群里还有别的同名机器人时尤其有用；留空则不提。'),
         h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.passive === true,
           disabled: busy, onChange: (event) => update('passive', event.target.checked) }), '主动接话'),
         h('p', { style: mutedStyle }, '群友没 @ 猫猫时，也判断要不要自然接一句。每条群消息会多一次模型调用。'),
