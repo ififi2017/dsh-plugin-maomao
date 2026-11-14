@@ -172,3 +172,20 @@ test('a picture rides along with a follow-up question once, and plain remarks do
   // Once a turn has looked at a picture it is not attached again.
   assert.deepEqual(recentImagesFrom(at('again', 25, { content: '分析下' }), receipts, 3, 120_000, { shown: new Set([screenshot.receiptKey]) }), []);
 });
+
+test('a screenshot of a page, balance or dashboard is never kept as a sticker, whatever the vision model says', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-screenshot-'));
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  try {
+    const envelope = normalizeInbound(message('shot', { attachments }), Date.now(), 'bot-a');
+    const remember = (result) => ordinary.media('remember_image', envelope, { data: png, collect: true, first_sight: true, result });
+    const kept = await remember({ description: 'Google AdSense 网页后台的收入卡片截图，余额 0 美元', text: '估算收入 US$0.10',
+      category: '无语', is_meme: true, confidence: 0.95, personal_or_sensitive: false, steal_reason: '收入太少时自嘲' });
+    assert.equal(kept.notice, undefined, 'the AdSense screenshot is not kept');
+    const sticker = await remember(description);
+    assert.match(sticker.notice ?? '', /偷走啦/, 'a real sticker still is');
+  } finally {
+    await ordinary.stop?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});

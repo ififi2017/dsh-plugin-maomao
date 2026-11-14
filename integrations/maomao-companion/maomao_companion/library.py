@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import math
+import re
 import shutil
 import sqlite3
 import time
@@ -50,6 +51,13 @@ def image_input(path):
         px = list(small.getdata())
         dhash = sum((px[y*9+x] > px[y*9+x+1]) << (y*8+x) for y in range(8) for x in range(8))
     return output.getvalue(), fmt.lower().replace("jpeg", "jpg"), f"{dhash:016x}"
+
+
+SCREENSHOT_WORDS = re.compile(r"截图|截屏|后台|网页|页面|界面|控制台|仪表盘|余额|收入|收益|账单|账户|订单|报表|表格|文档|聊天记录|对话框|设置页|AdSense|Dashboard|App Store", re.I)
+
+
+def looks_like_screenshot(description, ocr=""):
+    return bool(SCREENSHOT_WORDS.search(f"{description or ''} {ocr or ''}"))
 
 
 class MemeStore:
@@ -143,7 +151,10 @@ class MemeStore:
         confidence = result.get("confidence")
         if not isinstance(description, str) or not 1 <= len(description) <= 200 or not isinstance(ocr, str) or len(ocr) > 100 or category not in CATEGORIES:
             return None
-        eligible = result.get("is_meme") is True and type(confidence) in (int, float) and (0 if explicit else .85) <= confidence <= 1
+        # Whatever the vision model said, a screenshot of a page, dashboard, balance or document is
+        # not a sticker (it once kept an AdSense balance because the tiny numbers looked funny).
+        eligible = (result.get("is_meme") is True and type(confidence) in (int, float) and (0 if explicit else .85) <= confidence <= 1
+                    and not looks_like_screenshot(description, ocr))
         old = self.known(digest)
         seen = (old["seen"] if old else 0)+int(count_sighting)
         observed = old["last_seen"] if old and not count_sighting else time.time()
