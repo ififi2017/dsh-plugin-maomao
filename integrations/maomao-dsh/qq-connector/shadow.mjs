@@ -14,6 +14,12 @@ const PEER_SETTLE_MS = 1_500;
 const MAX_PEER_RECHECKS = 2;
 export const PEER_ROUNDS_WITHOUT_HUMANS = 2;
 const LIVELY_WINDOW_MS = 5 * 60_000;
+// Replies to another bot, counted across human messages: one person egging both bots on must not
+// turn them into an endless exchange. Per group: at most 3 in ten minutes while a single person
+// is watching, and 8 in an hour in any case.
+const PEER_BURST_MS = 10 * 60_000;
+const PEER_BURST_LIMIT = 3;
+const PEER_HOURLY_LIMIT = 8;
 const NAME_HINT = /猫猫|lxc|小猫|喵/i;
 const QUESTION_HINT = /[?？]|吗$|么$|呢$|有人(?:知道|懂|会|用过|拍过)|求(?:推荐|助|问)|怎么|为啥|为什么|哪(?:里|儿|个|款)|是什么|是啥|啥鸟|什么鸟|有多/;
 
@@ -61,7 +67,7 @@ export class PassiveShadow {
     if (!this.#groups.has(key)) {
       this.#groups.set(key, { rows: [], version: 0, inboundAt: 0, gap: 0,
         latestHuman: null, botAt: 0, botText: '', recipient: '', lastOpen: 0, openers: [],
-        pending: null, peerVersion: 0, peerJob: null, peerRounds: 0, lastPeerBanterAt: null, interrupt: null, outbound: [] });
+        pending: null, peerVersion: 0, peerJob: null, peerRounds: 0, lastPeerBanterAt: null, peerReplies: [], interrupt: null, outbound: [] });
     }
     return this.#groups.get(key);
   }
@@ -144,7 +150,8 @@ export class PassiveShadow {
       && (envelope.senderId === state.recipient || QUESTION_HINT.test(envelope.text));
     const mode = envelope.addressedToOther ? 'group_interjection'
       : named ? 'named' : followup ? 'followup' : 'unsolicited';
-    const canJudge = allowJudgment || peer && !peer.paused;
+    // Judge a human line only where unprompted replies are on; the other bot's lines still anchor on it.
+    const canJudge = allowJudgment;
     if (!canJudge) return this.#audit(envelope, mode, 'candidate', 'semantic_judge_unavailable');
     // Coalesce a fast followup instead of silently dropping it before judgment.
     const settleMs = state.botAt ? Math.max(0, REPLY_GAP_MS - (now - state.botAt)) : 0;
@@ -245,6 +252,12 @@ export class PassiveShadow {
       await audit('skip', severalPeople() ? 'banter_limit' : 'banter_without_humans');
       return null;
     }
+    state.peerReplies = (state.peerReplies ?? []).filter((at) => now - at < HOUR_MS);
+    const burst = !severalPeople() && state.peerReplies.filter((at) => now - at < PEER_BURST_MS).length >= PEER_BURST_LIMIT;
+    if (burst || state.peerReplies.length >= PEER_HOURLY_LIMIT) {
+      await audit('skip', burst ? 'banter_burst_cap' : 'banter_hourly_cap');
+      return null;
+    }
     const job = {};
     state.peerJob = job;
     const release = () => { if (state.peerJob === job) state.peerJob = null; };
@@ -266,6 +279,7 @@ export class PassiveShadow {
         if (!current()) return null;
         verdict = await this.#judge({ mode: 'peer_banter',
           rounds: { used: state.peerRounds, remaining: roundLimit() - state.peerRounds, limit: roundLimit() },
+          replies_to_bot_last_hour: state.peerReplies.length,
           several_people: severalPeople(),
           recent_messages: this.contextFor({ ...anchor, messageId: latest.messageId }),
           ordinary_memory: memory ?? null, current: { role: 'participant', speaker: turn.speaker, text: turn.text } }, anchor);
@@ -279,6 +293,7 @@ export class PassiveShadow {
       }
       state.peerRounds += 1;
       state.lastPeerBanterAt = this.#clock();
+      state.peerReplies.push(state.lastPeerBanterAt);
       await audit('would_reply', 'semantic_yes');
       selected = true;
       return { anchor, peerTurn: { ...turn, ...(verdict.form ? { form: verdict.form } : {}) }, memory, current, release };

@@ -29,7 +29,7 @@ async function withConnector(delivery, judge, harness, run, ordinary) {
     } };
   const connector = new MaomaoQqConnector(
     { sessionController: {}, emit() {}, logger: { warn() {}, error() {} } },
-    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [],
+    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [], typingPace: false,
       shadow: { enabled: true, path: join(root, 'shadow.jsonl'), debounceMs: 1,
         semantic: { enabled: true }, delivery }, ordinary: { enabled: Boolean(ordinary) } },
     { botFactory: () => bot, shadowJudge: judge, harness, ordinary });
@@ -262,4 +262,38 @@ test('semantic stop cancels only this exchange while a stop command remains paus
       else await until(() => sends.length === before + 1);
     });
   }
+});
+
+test('an approved unprompted group reply that names a reply form is still sent, with that form', { timeout: 4_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope, options) { asked.push(options); return '中'; } };
+  await withConnector({ enabled: true, groupAllowlist: ['test-group'] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('with-form'));
+      await firstSend;
+      assert.equal(sends[0].target.msgId, 'with-form');
+      assert.equal(asked[0].replyForm, 'brief');
+      assert.equal(asked[0].passive, true);
+    });
+});
+
+test('the panel 主动接话 switch turns unprompted replies on for a group outside the config lists, and off again', { timeout: 4_000 }, async () => {
+  const harness = { async ask() { return '中'; } };
+  await withConnector({ enabled: false, groupAllowlist: [] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('before'));
+      await delay(30);
+      assert.equal(sends.length, 0, 'not listed and no switch: only @ gets a reply');
+      const [group] = connector.peerGroups();
+      assert.equal(group.passive, false);
+      assert.equal((await connector.savePeerGroup({ ...group, passive: true })).status, 'saved');
+      assert.equal(connector.peerGroups()[0].passive, true);
+      await connector.accept(inbound('after'));
+      await firstSend;
+      assert.equal(sends[0].target.msgId, 'after');
+      await connector.savePeerGroup({ ...connector.peerGroups()[0], passive: false });
+      await connector.accept(inbound('off-again'));
+      await delay(30);
+      assert.equal(sends.length, 1);
+    });
 });

@@ -146,3 +146,12 @@ test('in sticker-tool mode a clear sticker is kept on first sight and announced 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a message of only a QQ store sticker is not empty: it reads as a QQ face, named when the sticker says so', () => {
+  const store = (ext) => normalizeInbound(message('store', { content: '',
+    raw: { content: `<faceType=3,faceId="ec7c4b1b0d3cd7b5",ext="${ext}">` } }), 0, 'bot-a');
+  assert.equal(store('opaque').text, '[QQ 表情]');
+  assert.equal(store(Buffer.from(JSON.stringify({ text: '[狗头保命]' })).toString('base64')).text, '[QQ 表情：狗头保命]');
+  const known = normalizeInbound(message('face', { content: '', raw: { content: '[<face,id=178/>]' } }), 0, 'bot-a');
+  assert.equal(known.text, '[QQ 表情：斜眼笑]');
+});

@@ -62,7 +62,7 @@ export class LearningRuntime {
     // Optional learning must never prevent an otherwise valid chat reply.
     try { return this.openTurn(options); } catch { return null; }
   }
-  openTurn({ namespace, scope, subject = 'self', label, platform, owner = false, text, sourceId, current = () => true, signal }) {
+  openTurn({ namespace, scope, subject = 'self', name = '', label, platform, owner = false, text, sourceId, current = () => true, signal }) {
     if (!this.settings.enabled || this.abort.signal.aborted || signal.aborted || !current()
       || !['desktop', 'private', 'qq'].includes(namespace) || typeof scope !== 'string' || !scope
       || !ordinaryLearningText(text) || !text?.trim()) return null;
@@ -71,6 +71,7 @@ export class LearningRuntime {
       .run(id, String(label ?? platform).slice(0, 120), String(platform).slice(0, 30));
     const store = this.store(id);
     const actor = learningKey(subject).slice(0, 16);
+    try { store.notePerson(actor, { name, owner }); } catch { /* Only a display label. */ }
     const source = learningKey(sourceId);
     if (!store.observe(source, actor, text.slice(0, 6000))) return null;
     let active = true; let calls = 0; let finished = false; let searches = 0;
@@ -328,7 +329,7 @@ export class LearningRuntime {
     if (request.action === 'read') {
       const { query = '', kind = '', page = 0 } = request;
       if (typeof query !== 'string' || query.length > 100 || !['', 'skill', ...memoryKinds].includes(kind) || !Number.isSafeInteger(page) || page < 0 || page > 100) return { status: 'invalid' };
-      return { status: 'ok', ...store.list({ query, kind, page }), review: store.reviewStatus() };
+      return { status: 'ok', ...store.list({ query, kind, page }), people: store.people(), review: store.reviewStatus() };
     }
     if (request.action === 'history' && typeof request.id === 'string') return { status: 'ok', items: store.history(request.id) };
     if (request.action === 'edit' && request.entry && typeof request.entry.id === 'string') {

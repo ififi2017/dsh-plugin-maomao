@@ -3,7 +3,7 @@ import { chatSeesImages, chatSelection, completeText } from '../model-call.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as wait } from 'node:timers/promises';
-import { typingPause } from '../pacing.mjs';
+import { joinInPause, typingPause } from '../pacing.mjs';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
 import { apiError, log } from '../debug-log.mjs';
 
@@ -330,20 +330,37 @@ export class MaomaoQqConnector {
       paused: saved?.paused === true, maxRounds: saved?.maxRounds ?? 2, waitMs: legacy?.waitMs };
   }
 
-  peerGroups() {
-    return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
-      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId) }));
+  // Unprompted replies in a group: the panel switch once saved; before that, the config lists
+  // (shadow.semantic + shadow.delivery groupAllowlist) or an enabled group interaction, as before.
+  #groupPassive(chatId) {
+    if (!this.#shadow) return false;
+    const saved = this.#state.peerSettings(this.#appId, chatId);
+    if (saved?.paused === true) return false;
+    if (typeof saved?.passive === 'boolean') return saved.passive;
+    const delivery = this.#config.shadow?.delivery;
+    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
+    const listed = delivery?.enabled === true && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(chatId)
+      && this.#config.shadow?.semantic?.enabled === true && (!Array.isArray(judgeGroups) || judgeGroups.includes(chatId));
+    return listed || this.#groupPeer(chatId).enabled;
   }
 
-  async savePeerGroup({ id, enabled, maxRounds, paused }) {
+  peerGroups() {
+    return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
+      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId),
+        passive: typeof this.#state.peerSettings(this.#appId, groupOpenId)?.passive === 'boolean'
+          ? this.#state.peerSettings(this.#appId, groupOpenId).passive : this.#groupPassive(groupOpenId) }));
+  }
+
+  async savePeerGroup({ id, enabled, maxRounds, paused, passive }) {
     const group = this.personaTargets().find((target) => target.id === id && target.kind === 'qq-group');
     if (!group?.groupOpenId || !this.#shadow) return { status: 'unavailable' };
-    if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5) {
+    if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5
+      || (passive !== undefined && typeof passive !== 'boolean')) {
       return { status: 'invalid' };
     }
     this.#shadow.cancelPeer({ botId: this.#appId, chatId: group.groupOpenId });
     await this.#state.savePeerSettings(this.#appId, group.groupOpenId, {
-      enabled, paused, maxRounds,
+      enabled, paused, maxRounds, ...(passive !== undefined ? { passive } : {}),
     });
     return { status: 'saved' };
   }
@@ -463,14 +480,10 @@ export class MaomaoQqConnector {
 
   async accept(message) {
     if (this.#stopped) return false;
-    const delivery = this.#config.shadow?.delivery;
-    const passiveGroup = message?.kind === 'group' && delivery?.enabled === true
-      && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(message.groupOpenid);
     const peerSettings = message?.kind === 'group' ? this.#groupPeer(message.groupOpenid) : null;
     const peer = peerSettings?.enabled ? peerSettings : null;
-    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
-    const allowJudgment = this.#config.shadow?.semantic?.enabled === true
-      && (!Array.isArray(judgeGroups) || judgeGroups.includes(message?.groupOpenid));
+    // Whether the cat may join this group's conversation without being @-mentioned.
+    const passiveReplies = message?.kind === 'group' && this.#groupPassive(message.groupOpenid);
     if (message?.senderIsBot === true && peer) {
       const group = { botId: this.#appId, scope: 'group', chatId: message.groupOpenid };
       if (!this.#allowed(group) || message.senderId === this.#appId) return false;
@@ -585,13 +598,13 @@ export class MaomaoQqConnector {
     // The model decides what is worth learning; no keyword or fixed imitation rules.
     if (envelope.scope === 'group' && !envelope.addressed && this.#config.ordinary?.enabled === true && envelope.text && !envelope.text.startsWith('/')) {
       this.#ctx.get?.('maomaoLearning')?.open({ namespace: 'qq', scope: qqMemoryScope(envelope),
-        subject: envelope.senderId, owner: this.#isOwner(envelope), label: `QQ 群 · ${envelope.chatId.slice(-8)}`, platform: 'qq',
+        subject: envelope.senderId, name: envelope.senderName, owner: this.#isOwner(envelope), label: `QQ 群 · ${envelope.chatId.slice(-8)}`, platform: 'qq',
         text: envelope.text, sourceId: envelope.receiptKey, signal: this.#abort.signal,
         current: () => !this.#stopped && this.#allowed(envelope),
       })?.finish();
     }
     const shadowDecision = this.#shadow?.observe(envelope, {
-      hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment,
+      hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment: passiveReplies,
     }) ?? null;
     if (shadowDecision) void shadowDecision.catch((error) =>
       this.#logger.warn?.('QQ shadow unavailable:', errorLabel(error)));
@@ -610,13 +623,17 @@ export class MaomaoQqConnector {
       && (envelope.text || priorImage || inboundImage(envelope) || waitsForSplitImage(envelope)
         || envelope.attachments.some((item) => item.asrText))) {
       this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
-    } else if (shadowDecision && (passiveGroup && allowJudgment || peer && !peer.paused)) {
+    } else if (shadowDecision && passiveReplies) {
       void shadowDecision.then((row) => {
+        // The judge's reply form travels with the turn; inbound messages are frozen and must not be
+        // written to (doing so threw and silently dropped every unprompted group reply).
         if (row?.decision === 'would_reply' && this.#shadow?.isLatest(envelope)) {
-          if (row.form) envelope.replyForm = row.form;
-          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer);
+          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer, { replyForm: row.form ?? null });
         }
-      }).catch((error) => this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error)));
+      }).catch((error) => {
+        this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error));
+        log('warn', 'qq', '主动接话没能开始', errorLabel(error));
+      });
     }
     // Every posted picture gets a quick look in the background, the way a person notices a sticker
     // in passing; likely stickers are kept quietly and mentioned (or not) on the cat's next turn.
@@ -673,8 +690,9 @@ export class MaomaoQqConnector {
   }
 
   #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null,
-    { peerTurn = null, peerCurrent = null } = {}, choiceProfile = null, test = null) {
+    { peerTurn = null, peerCurrent = null, replyForm = null } = {}, choiceProfile = null, test = null) {
     const queued = this.#enqueue(envelope, async () => {
+      const turnStart = Date.now();
       const profile = channelPersona(this.#ctx, personaTarget(envelope));
       if (envelope.receivedAt < profile.changedAt || (choiceProfile && choiceProfile !== profile.token)) return;
       const current = () => !this.#stopped && this.#allowed(envelope) && profile.current()
@@ -768,7 +786,7 @@ export class MaomaoQqConnector {
           ? { namespace: 'private', scope: ownerMemory.scope, subject: linkedOwner, owner: true, label: ownerMemory.label,
             platform: ownerMemory.platform, text: learningText, sourceId: envelope.receiptKey, current, signal }
           : { namespace: 'qq', scope: qqMemoryScope(envelope),
-            subject: envelope.senderId, owner: this.#isOwner(envelope),
+            subject: envelope.senderId, name: envelope.senderName, owner: this.#isOwner(envelope),
             label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
             // An image-only turn still gets the memory tools, so the model never meets an unknown tool.
             text: learningText, sourceId: envelope.receiptKey, current, signal }) : null;
@@ -795,9 +813,10 @@ export class MaomaoQqConnector {
       const choices = !test && envelope.scope === 'group' && !passive
         && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group') && this.#choiceThrottle.allow(chatKey);
       log('info', 'qq', `${envelope.scope === 'group' ? '群' : '私聊'}回合${peerTurn ? '（接机器人）' : passive ? '（主动接话）' : ''}`,
-        { chat: envelope.chatId.slice(-6), text: (peerTurn?.text ?? envelope.text).slice(0, 200), images: images.length, directVision, form: envelope.replyForm ?? peerTurn?.form ?? null, choices });
+        { chat: envelope.chatId.slice(-6), text: (peerTurn?.text ?? envelope.text).slice(0, 200), images: images.length, directVision, form: replyForm ?? peerTurn?.form ?? null, choices });
       if (!test && !peerTurn && envelope.scope === 'c2c') void this.#typing(envelope);
       const reply = await this.#harness.ask(envelope, {
+        replyForm,
         images,
         imageDescription,
         referencedImage: linkedImage ? { sameSender: linkedImage.senderId === envelope.senderId }
@@ -845,6 +864,13 @@ export class MaomaoQqConnector {
       }
       const limit = test || choiceProfile || (passive && peer) ? 1 : undefined;
       const card = choices && options.length ? { profile: profile.token, options } : null;
+      // Joining in on its own, a person reads the line first and then types; a reply 2 seconds
+      // after another bot spoke reads as a script. Time spent thinking already counts.
+      if (!test && envelope.scope === 'group' && (passive || peerTurn) && this.#config.typingPace !== false) {
+        const pause = joinInPause(peerTurn?.text ?? envelope.text, textBubbles(answer, 1)[0] ?? answer) - (Date.now() - turnStart);
+        if (pause > 0) await wait(pause, undefined, { signal: this.#abort.signal }).catch(() => {});
+        if (!current()) return;
+      }
       test?.('sending');
       const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn) }).catch((error) => {
         test?.('delivery_failed');
@@ -1077,7 +1103,10 @@ export class MaomaoQqConnector {
       if (this.#queues.get(key) === queued) this.#queues.delete(key);
     });
     this.#queues.set(key, queued);
-    void queued.catch((error) => this.#logger.error?.('QQ queued action failed:', errorLabel(error)));
+    void queued.catch((error) => {
+      this.#logger.error?.('QQ queued action failed:', errorLabel(error));
+      log('error', 'qq', '回合出错，没有回复', errorLabel(error));
+    });
     return queued;
   }
 

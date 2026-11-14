@@ -51,8 +51,10 @@ test('mounting chat guidance for the default cat keeps her full persona in the r
   assert.match(sections[0].text, /你是猫猫，一只原创的成年河南猫娘/);
   assert.match(sections[0].text, /## 运行规则/);
   assert.match(sections[0].text, /\[聊天工具\] 指引$/);
+  assert.match(sections[0].text, /认真帮忙的时候也还是你自己在说话/, 'serious help keeps the character voice');
   await mount(controller, 's', { name: '小狗', prompt: '你是小狗。' }, '');
   assert.doesNotMatch(sections[1].text, /河南猫娘/, 'a custom persona replaces the cat');
+  assert.match(sections[1].text, /认真帮忙的时候也还是你自己在说话/, 'custom personas keep their voice too');
 });
 
 test('message time tags: full date after a new day or long gap, time otherwise, never echoed back', async () => {
