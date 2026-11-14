@@ -92,8 +92,22 @@ function stripLeadingBotMention(message, text, botId) {
 // QQ faces arrive as IDs. Naming them lets the model know which face was sent ([QQ 表情：旺柴]).
 // Names from dafeiyu-astrbot's face_map.json (MIT), keyed by the QQ face ID.
 const QQ_FACES = JSON.parse(readFileSync(new URL('./qq-faces.json', import.meta.url), 'utf8'));
-const faceText = (id) => QQ_FACES[id] ? `[QQ 表情：${QQ_FACES[id]}]` : '[QQ 表情]';
-const rawFaces = (raw) => [...raw.matchAll(/\[<face,id=(\d+)\/?>\]|<faceType=\d+,faceId="?(\d+)/g)].map((m) => faceText(m[1] ?? m[2])).join('');
+// Store stickers (表情商店) use non-numeric IDs; their ext may carry a base64 JSON with the name.
+const extName = (ext) => {
+  try {
+    const value = JSON.parse(Buffer.from(String(ext ?? ''), 'base64').toString('utf8'));
+    const name = [value?.text, value?.name, value?.summary, value?.desc].find((item) => typeof item === 'string' && item.trim());
+    return name ? name.replace(/^\[|\]$/g, '').trim().slice(0, 20) : '';
+  } catch { return ''; }
+};
+const faceText = (id, ext) => {
+  if (QQ_FACES[id]) return `[QQ 表情：${QQ_FACES[id]}]`;
+  const name = extName(ext);
+  return name ? `[QQ 表情：${name}]` : '[QQ 表情]';
+};
+// Every face tag counts, whatever its ID looks like: a message of only a store sticker is not empty.
+const FACE_TAG = /\[<face,id=([^>\/\]]*)\/?>\]|<faceType=\d+,faceId="?([^",>]*)"?(?:,ext="?([^">]*)"?)?[^>]*>?/g;
+const rawFaces = (raw) => [...raw.matchAll(FACE_TAG)].map((m) => faceText(m[1] ?? m[2], m[3])).join('');
 
 export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
   if (!message || !['group', 'c2c'].includes(message.kind) || message.senderIsBot === true) return null;
@@ -127,7 +141,7 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
     addressed,
     addressedToOther,
     text: (body
-      .replace(/<faceType=\d+,faceId="([^"]*)",ext="[^"]*">/g, (_, id) => faceText(id))
+      .replace(/<faceType=\d+,faceId="([^"]*)",ext="([^"]*)">/g, (_, id, ext) => faceText(id, ext))
       || rawFaces(message.raw?.content ?? ''))
       .slice(0, 12000),
     attachments: Object.freeze(attachments),

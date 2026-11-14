@@ -57,6 +57,7 @@ class MaomaoPanel extends TypertRemoteService {
       channels: {
         feishu: channelStates.has(privateStatus?.channels?.feishu) ? privateStatus.channels.feishu : 'off',
         telegram: channelStates.has(privateStatus?.channels?.telegram) ? privateStatus.channels.telegram : 'off',
+        weixin: channelStates.has(privateStatus?.channels?.weixin) ? privateStatus.channels.weixin : 'off',
         qq: qq?.ready ? 'ready' : (qq?.running ? 'waiting' : 'off'),
       },
       channelSetup: this.setup.status(),
@@ -70,11 +71,13 @@ class MaomaoPanel extends TypertRemoteService {
       media: {
         feishu: mediaCheck(privateStatus?.media?.feishu),
         telegram: mediaCheck(privateStatus?.media?.telegram),
+        weixin: mediaCheck(privateStatus?.media?.weixin),
         qq: mediaCheck(qq?.media),
       },
       diagnostics: {
         feishu: diagnostics(privateStatus?.diagnostics?.feishu),
         telegram: diagnostics(privateStatus?.diagnostics?.telegram),
+        weixin: diagnostics(privateStatus?.diagnostics?.weixin),
         qq: diagnostics(qq?.diagnostics),
       },
       // The last time QQ refused a Markdown or button message, so the panel can show the code.
@@ -89,7 +92,7 @@ class MaomaoPanel extends TypertRemoteService {
       },
       sharing: {
         mode: shareModes.has(share?.mode) ? share.mode : 'off',
-        destination: ['feishu', 'telegram'].includes(share?.destination) ? share.destination : null,
+        destination: ['feishu', 'telegram', 'weixin'].includes(share?.destination) ? share.destination : null,
         browse: share?.browse === true,
         lonely: share?.lonely === true,
         last: Number.isFinite(last?.at) && shareResults.has(last.status) ? { at: last.at, status: last.status } : null,
@@ -184,7 +187,7 @@ class MaomaoPanel extends TypertRemoteService {
   async pair(request) {
     requireOwner(this.ctx);
     const { platform, action, id, proof, owner, scope, bindingId } = request ?? {};
-    if (!['feishu', 'telegram', 'qq'].includes(platform) || !['start', 'current', 'read', 'confirm', 'cancel'].includes(action)
+    if (!['feishu', 'telegram', 'weixin', 'qq'].includes(platform) || !['start', 'current', 'read', 'confirm', 'cancel'].includes(action)
       || (['read', 'confirm', 'cancel'].includes(action) && (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)))
       || (action === 'confirm' && (typeof proof !== 'string' || !/^[a-f0-9]{8}$/.test(proof)))
       || (owner && ((platform === 'qq' && scope !== 'c2c') || typeof owner !== 'string' || !/^[a-f0-9]{64}$/.test(owner)))
@@ -198,7 +201,7 @@ class MaomaoPanel extends TypertRemoteService {
   replyCheck(request) {
     requireOwner(this.ctx);
     const { platform, action, route } = request ?? {};
-    if (!['feishu', 'telegram', 'qq'].includes(platform) || !['start', 'read'].includes(action)
+    if (!['feishu', 'telegram', 'weixin', 'qq'].includes(platform) || !['start', 'read'].includes(action)
       || (action === 'start' && (typeof route !== 'string' || !/^[a-f0-9]{64}$/.test(route)))) {
       return { status: 'unavailable' };
     }
@@ -216,7 +219,7 @@ class MaomaoPanel extends TypertRemoteService {
   async unbind(request) {
     requireOwner(this.ctx);
     const { platform, id } = request ?? {};
-    if (!['feishu', 'telegram', 'qq'].includes(platform) || typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) {
+    if (!['feishu', 'telegram', 'weixin', 'qq'].includes(platform) || typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) {
       return { status: 'invalid' };
     }
     const removed = platform === 'qq' ? await this.ctx.get('maomaoQq')?.unbind?.(id)

@@ -34,6 +34,17 @@ const LINES = {
   low: '刚才的气氛让你有点蔫，语气安静些，不硬撑热情。',
 };
 
+// Running jokes that cats-and-bots chats keep circling back to. A theme used in three or more
+// lines here within 12 hours gets a one-line nudge to find something else.
+const MOTIF_WINDOW = 12 * HOUR;
+const MOTIF_LIMIT = 3;
+const MOTIFS = [
+  ['小鱼干', /小鱼干|鱼干/], ['烩面', /烩面/], ['纸箱', /纸箱|箱子/], ['晒太阳', /晒太阳|太阳地|向阳/],
+  // Ears, tail, paws and bell are body parts that move with emotion, not running jokes.
+  ['猫条和罐头', /猫条|罐头/], ['吸尘器', /吸尘器/], ['香菜', /香菜/], ['辣条', /辣条/], ['复读机', /复读机|学舌|学俺说话/], ['静电和炸毛', /静电|炸毛/],
+];
+const day = (at) => new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || undefined }).format(at);
+
 export class MoodBook {
   #path;
   #now;
@@ -93,6 +104,50 @@ export class MoodBook {
     if (hour >= 0 && hour < 6) return 'sleepy';
     if (valence >= 0.35) return 'joyful';
     if (valence <= -0.35) return 'low';
+    return '';
+  }
+
+  // A line someone said here (猫猫 or another bot): remember which running jokes it used.
+  noteLine(key, text, at = Date.now()) {
+    if (typeof text !== 'string' || !text.trim()) return;
+    const state = this.#states.get(key) ?? { valence: 0, pout: 0, at };
+    const motifs = { ...(state.motifs ?? {}) };
+    for (const [label, pattern] of MOTIFS) {
+      const uses = (motifs[label] ?? []).filter((t) => at - t < MOTIF_WINDOW);
+      if (pattern.test(text)) uses.push(at);
+      if (uses.length) motifs[label] = uses.slice(-10); else delete motifs[label];
+    }
+    this.#states.set(key, { ...state, motifs });
+    this.#save();
+  }
+
+  repeatNudge(key, at = this.#now()) {
+    const motifs = this.#states.get(key)?.motifs ?? {};
+    const worn = Object.entries(motifs).map(([label, uses]) => [label, uses.filter((t) => at - t < MOTIF_WINDOW).length])
+      .filter(([, count]) => count >= MOTIF_LIMIT).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([label]) => `「${label}」`);
+    return worn.length ? `[今天这里已经拿${worn.join('')}说过好几回了，大家都听腻了。这句别再绕回去，从眼前这句话本身找话接。]` : '';
+  }
+
+  // How well 猫猫 knows someone in a group: how often they have talked and on how many days.
+  acquaint(key, person, at = Date.now()) {
+    if (!person) return;
+    const state = this.#states.get(key) ?? { valence: 0, pout: 0, at };
+    const people = { ...(state.people ?? {}) };
+    const known = people[person] ?? { count: 0, days: [], first: at };
+    const today = day(at);
+    people[person] = { ...known, count: known.count + 1, last: at,
+      days: known.days.includes(today) ? known.days : [...known.days, today].slice(-7) };
+    const names = Object.keys(people);
+    if (names.length > 200) delete people[names.sort((a, b) => people[a].last - people[b].last)[0]];
+    this.#states.set(key, { ...state, people });
+    this.#save();
+  }
+
+  familiarity(key, person) {
+    const known = person ? this.#states.get(key)?.people?.[person] : null;
+    if (!known || known.count <= 1) return '[这位群友你还不太熟，先自然礼貌一点，熟了再开玩笑。]';
+    if (known.count >= 15 && known.days.length >= 2) return '[这位是常跟你在群里聊的熟人，说话可以随意、熟络些。]';
+    if (known.count >= 4) return '[这位群友你打过几次交道，轻松友好就好。]';
     return '';
   }
 

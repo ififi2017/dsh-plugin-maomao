@@ -8,9 +8,9 @@ window.__ModuleLoader__.load({
     const modes = { off: '未启用', manual: '仅手动', shadow: '模拟', send: '实际发送' };
     const results = { unavailable: '暂不满足发送条件', shadow: '已模拟', denied: '请求被拒绝',
       cancelled: '已取消', uncertain: '投递待确认', sent: '已投递' };
-    const destinations = { desktop: '桌面会话', feishu: 'Lark / 飞书', telegram: 'Telegram', qq: 'QQ' };
-    const platforms = ['feishu', 'telegram', 'qq'];
-    const pairingTitles = { feishu: '绑定飞书 / Lark 私聊', telegram: '绑定 Telegram 私聊', qq: '绑定 QQ 群或私聊' };
+    const destinations = { desktop: '桌面会话', feishu: 'Lark / 飞书', telegram: 'Telegram', weixin: '微信', qq: 'QQ' };
+    const platforms = ['feishu', 'telegram', 'weixin', 'qq'];
+    const pairingTitles = { feishu: '绑定飞书 / Lark 私聊', telegram: '绑定 Telegram 私聊', weixin: '绑定微信私聊', qq: '绑定 QQ 群或私聊' };
     const mediaLabels = {
       ok: '下载成功', lark_permission: '缺少读取消息资源的权限（99991672），检查 im:message:readonly 和版本发布',
       permission: '平台拒绝访问，检查应用权限或凭据', missing: '资源不存在或已经过期', rate_limit: '触发平台限流',
@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
       wrong_edition: '扫描使用的飞书版本与当前选择不一致。', managed_credentials_required: '请先导入这个 Bot 的凭据。',
       configuration_unavailable: '桌面配置已变更，请刷新后重试。', configuration_rejected: '配置保存失败，检查是否有更高优先级的覆盖配置。',
       expired: '授权已超时，请重新开始。', expired_token: '二维码已过期，请重新开始。',
+      weixin_already_bound: '这个微信 ClawBot 已经连接了别的程序。先在微信里解除旧连接，再重新扫码。',
+      weixin_verify_code_required: '微信要求输入验证码，暂不支持。请稍后重新扫码。',
+      weixin_session_expired: '微信登录已失效，请重新扫码连接。',
       access_denied: '平台没有批准授权。', invalid_qr: '平台返回的二维码地址无法验证。',
     };
     const connectionLabels = { preparing: '正在准备…', scan: '等待平台授权…', verifying: '正在验证凭据…',
@@ -205,7 +208,7 @@ window.__ModuleLoader__.load({
 
     function ChannelWizard({ snapshot, invoke, onChange, platform }) {
       const setup = snapshot.channelSetup[platform];
-      const [mode, setMode] = useState('import');
+      const [mode, setMode] = useState(platform === 'weixin' ? 'scan' : 'import');
       const [brand, setBrand] = useState(setup.brand);
       const [account, setAccount] = useState('');
       const [secret, setSecret] = useState('');
@@ -275,8 +278,8 @@ window.__ModuleLoader__.load({
           h('div', { style: lineStyle },
             h('select', { 'aria-label': '连接方式', value: mode, style: inputStyle, disabled: busy,
               onChange: (event) => { setMode(event.target.value); setSecret(''); } },
-            h('option', { value: 'import' }, '导入已有 Bot'),
-            h('option', { value: 'scan' }, platform === 'telegram' ? '用管理 Bot 扫码创建' : '扫码授权')),
+            platform !== 'weixin' && h('option', { value: 'import' }, '导入已有 Bot'),
+            h('option', { value: 'scan' }, platform === 'telegram' ? '用管理 Bot 扫码创建' : platform === 'weixin' ? '微信扫码连接 ClawBot' : '扫码授权')),
             mode === 'import' && platform !== 'telegram' && h('input', {
               'aria-label': 'Bot App ID', placeholder: 'App ID', value: account, style: inputStyle,
               disabled: busy, onChange: (event) => setAccount(event.target.value),
@@ -286,6 +289,7 @@ window.__ModuleLoader__.load({
               placeholder: platform === 'telegram' ? mode === 'scan' ? '管理 Bot Token' : 'Bot Token' : 'App Secret',
               value: secret, style: inputStyle, disabled: busy, onChange: (event) => setSecret(event.target.value),
             })),
+          platform === 'weixin' && h('p', { style: { margin: 0 } }, '用要和猫猫聊天的那个微信扫码。微信里需要有「我 → 设置 → 插件 → ClawBot」入口；只支持私聊，不支持群聊，也不能发语音条。'),
           platform === 'telegram' && h('a', { href: 'https://t.me/BotFather', target: '_blank', rel: 'noreferrer' },
             mode === 'scan' ? '在 BotFather 开启管理 Bot 模式' : '在 BotFather 创建 Bot 或获取 Token'),
           h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: exclusive, disabled: busy,
@@ -298,7 +302,7 @@ window.__ModuleLoader__.load({
           job?.qr && h('div', { style: { display: 'grid', gap: 6, justifyItems: 'start' } },
             job.qr.image && h('img', { alt: '平台授权二维码', width: 210, height: 210, src: job.qr.image }),
             h('a', { href: job.qr.url, target: '_blank', rel: 'noreferrer' },
-              job.qr.step === 'create' ? '打开 Telegram 创建 Bot' : '打开平台授权链接')),
+              job.qr.step === 'create' ? '打开 Telegram 创建 Bot' : job.qr.step === 'confirm' ? '已扫码，请在微信里确认' : '打开平台授权链接')),
           platform === 'feishu' &&
             h('a', { href: consoleLink, target: '_blank', rel: 'noreferrer' }, '在平台检查机器人权限、长连接事件和版本发布')))
           : h('p', { style: { margin: 0 } }, connectionErrors.setup_missing),
@@ -307,9 +311,8 @@ window.__ModuleLoader__.load({
     }
 
     function BindingControls({ snapshot, invoke, onBound, platform, relink, closeRelink }) {
-      const other = platform === 'feishu' ? 'telegram' : 'feishu';
       const owners = snapshot.bindings.private.filter((item) =>
-        !relink || (item.id !== relink.ownerId && item.channels.includes(other)));
+        !relink || (item.id !== relink.ownerId && item.channels.some((kind) => kind !== platform)));
       const [owner, setOwner] = useState(null);
       const [scope, setScope] = useState('group');
       const [pairing, setPairing] = useState(null);
@@ -567,9 +570,13 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); }
       }
       return h('div', { style: { display: 'grid', gap: 8 } },
-        h('p', { style: { margin: 0 } }, '模型会参考同群上下文和已启用的 QQ 普通记忆，判断是否接群里的话。'),
+        h('p', { style: { margin: 0 } }, '被 @ 或引用时猫猫总会回复。下面两项决定没被 @ 时，要不要让模型参考同群上下文和 QQ 普通记忆，自己判断接不接话。'),
+        h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.passive === true,
+          disabled: busy, onChange: (event) => update('passive', event.target.checked) }), '主动接话'),
+        h('p', { style: mutedStyle }, '群友没 @ 猫猫时，也判断要不要自然接一句。每条群消息会多一次模型调用。'),
         h('label', { style: lineStyle }, h('input', { type: 'checkbox', checked: value.enabled,
-          disabled: busy, onChange: (event) => update('enabled', event.target.checked) }), '启用群互动'),
+          disabled: busy, onChange: (event) => update('enabled', event.target.checked) }), '和其他机器人互动'),
+        h('p', { style: mutedStyle }, '群里有别的机器人时，判断要不要接它的话。10 分钟内最多接 3 次（只有一个人在看时），一小时最多 8 次。'),
         h('label', { style: lineStyle }, '多人一起聊时，和其他机器人最多接几轮',
           h('select', { value: value.maxRounds, style: draft ? unsavedStyle : inputStyle, disabled: busy,
             onChange: (event) => update('maxRounds', Number(event.target.value)) },
@@ -1120,10 +1127,18 @@ window.__ModuleLoader__.load({
     }
 
     const learningKinds = { profile: '对象档案', episode: '经历与待办', skill: '可复用技能', style: '语气与互动习惯', meme: '梗知识', followup: '惦记的事', diary: '猫猫日记' };
-    const learningPlatforms = { desktop: '桌面', private: '私聊', 'private-shared': '主人私聊共享', qq: 'QQ', feishu: 'Lark / 飞书', telegram: 'Telegram' };
+    const learningPlatforms = { desktop: '桌面', private: '私聊', 'private-shared': '主人私聊共享', qq: 'QQ', feishu: 'Lark / 飞书', telegram: 'Telegram', weixin: '微信' };
     const learningTtl = { episode: 30, followup: 14, diary: 60 };
     const learningResults = { saved: '已保存', failed: '操作失败，请重试', conflict: '这条内容刚有更新，请刷新后再修改',
       invalid: '内容或参数不符合要求', missing: '这条内容已不可用', unavailable: '学习服务尚未就绪', forgotten: '已遗忘，请从版本记录恢复' };
+    // Memories saved before labels existed: a private or desktop scope only ever holds the owner.
+    const speakerLabel = (people, subject, source) => {
+      const known = people?.[subject];
+      if (known?.owner || (!known && source && !/群/.test(source.label ?? ''))) {
+        return known?.name && known.name !== '主人' ? `主人（${known.name}）` : '主人';
+      }
+      return known?.name ? `${known.name}（${String(subject).slice(0, 4)}）` : `群友 ${String(subject).slice(0, 4)}`;
+    };
     function LearningView({ invoke, drafts }) {
       const [catalog, setCatalog] = useState(null);
       const [filters, setFilters] = useState({ sourceId: '', kind: '', query: '', page: 0 });
@@ -1214,10 +1229,11 @@ window.__ModuleLoader__.load({
         result?.review && h('p', { style: mutedStyle }, `最近后台总结：${({ learned: '已学到新内容', no_change: '没有需要新增的经验', skipped: '本轮未学习', running: '处理中', failed: '调用失败，下次对话可再总结' })[result.review.outcome] ?? result.review.outcome} · ${timestamp(result.review.at)}`),
         result?.status === 'ok' && h('p', { role: 'status' }, `${result.total} 条记录；“待验证”的经验使用时仍需结合当前要求。`),
         result && result.status !== 'ok' && h('p', { role: 'alert' }, '学习记录读取失败，请刷新。'),
-        // Speakers are stored as hashes; only distinguish them when a group scope has several.
-        ...(result?.items ?? []).map((item, _i, items) => h('article', { key: item.id, style: { ...sectionStyle, ...stackStyle, overflowWrap: 'anywhere' } },
+        // Speakers are stored as fingerprints of their platform ID: show the owner, a name the
+        // platform sent, or a short stable tag, so it is clear whose memory each entry is.
+        ...(result?.items ?? []).map((item) => h('article', { key: item.id, style: { ...sectionStyle, ...stackStyle, overflowWrap: 'anywhere' } },
           h('strong', null, item.title),
-          h('div', { style: mutedStyle }, `${learningKinds[item.kind]} · ${item.certainty === 'confirmed' ? '已确认' : '待验证'} · ${memoryStates[item.status] ?? item.status}${new Set(items.map(row => row.subject)).size > 1 ? ` · 发言者 ${[...new Set(items.map(row => row.subject))].indexOf(item.subject) + 1}` : ''} · 第 ${item.version} 版`),
+          h('div', { style: mutedStyle }, `${learningKinds[item.kind]} · ${item.certainty === 'confirmed' ? '已确认' : '待验证'} · ${memoryStates[item.status] ?? item.status} · ${item.kind === 'diary' ? '写于和' : '关于'} ${speakerLabel(result.people, item.subject, (catalog?.sources ?? []).find(s => s.id === filters.sourceId))}${item.kind === 'diary' ? ' 聊天时' : ''} · 第 ${item.version} 版`),
           h('div', { style: { whiteSpace: 'pre-wrap' } }, item.body),
           item.quote && h('details', null, h('summary', null, '学习依据'), h('p', null, item.quote)),
           h('div', { style: mutedStyle }, `更新 ${timestamp(item.updated)} · 调用 ${item.used} 次${item.last_used ? ` · 最近使用 ${timestamp(item.last_used)}` : ''}`),
@@ -1513,7 +1529,7 @@ window.__ModuleLoader__.load({
       const snapshot = state.snapshot;
       const canRelink = route => route.platform !== 'qq' && snapshot.channels[route.platform] === 'ready'
         && snapshot.bindings.private.some(owner => owner.id !== route.ownerId
-          && owner.channels.includes(route.platform === 'feishu' ? 'telegram' : 'feishu'));
+          && owner.channels.some((kind) => kind !== route.platform));
       const openRelink = route => { setRelink(route); go({ platform: route.platform, view: 'channels', channelTab: 'bindings' }); };
       const openChannel = value => {
         setRelink(null);

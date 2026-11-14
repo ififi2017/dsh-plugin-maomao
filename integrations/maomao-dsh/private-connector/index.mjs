@@ -7,6 +7,8 @@ import { FeishuTransport, TelegramTransport } from './transports.mjs';
 import { provisionFeishu } from './setup-feishu.mjs';
 import { provisionTelegram } from './setup-telegram.mjs';
 import { telegramBotId } from './telegram-api.mjs';
+import { WeixinTransport } from './weixin-transport.mjs';
+import { provisionWeixin } from './weixin-api.mjs';
 import { ChoiceThrottle, choiceGuidance, parseChoiceData, parseChoiceReply } from '../choices.mjs';
 import { hasMarkdownFence } from '../message-markdown.mjs';
 import { catDescription, channelPersona, mountChannelPersona, turnReference } from '../personas.mjs';
@@ -31,9 +33,9 @@ export const name = 'maomao-dsh-private';
 export const inject = ['sessionController'];
 export const PRESET = 'maomao-private-ordinary';
 
-const safeError = (error) => /^(?:telegram|feishu|private)_[a-z0-9_]{1,80}$/.test(error?.code ?? '')
+const safeError = (error) => /^(?:telegram|feishu|weixin|private)_[a-z0-9_]{1,80}$/.test(error?.code ?? '')
   ? error.code : 'private_operation_failed';
-const labels = { feishu: '飞书', telegram: 'Telegram' };
+const labels = { feishu: '飞书', telegram: 'Telegram', weixin: '微信' };
 const scopedRoute = (event, owner) => digest([event.platform, event.accountId, event.chatId, owner]);
 const accountKey = (platform, accountId) => digest([platform, accountId]);
 const bindingRoute = (event) => scopedRoute(event, null);
@@ -146,7 +148,7 @@ export class PrivateConnector {
     this.#memoryRoot = join(root, 'ordinary');
     // Test runs keep the mood in memory only, so they never touch a real profile's file.
     this.#mood = mood ?? new MoodBook(join(root, 'mood.json'));
-    this.#routes = routes ?? this.#makeRoutes(config, secrets);
+    this.#routes = routes ?? this.#makeRoutes(config, secrets, root);
     this.#ledger = ledger ?? new PrivateLedger(join(root, 'delivery.sqlite3'));
     const worker = new OwnerMemory({
       ...config.memory, quietHours: config.sharing?.quietHours, root: this.#memoryRoot, modelSelection: () => ctx.get?.('maomaoModels'),
@@ -168,7 +170,7 @@ export class PrivateConnector {
     }
   }
 
-  #makeRoutes(config, secrets) {
+  #makeRoutes(config, secrets, root) {
     const routes = new Map();
     if (config.feishu?.enabled) {
       const appId = config.feishu.credentialRef ? config.feishu.accountId : process.env.MAOMAO_DSH_FEISHU_APP_ID;
@@ -181,6 +183,11 @@ export class PrivateConnector {
       routes.set('telegram', new TelegramTransport({
         token: config.telegram.credentialRef ? secrets?.telegram : process.env.MAOMAO_DSH_TELEGRAM_TOKEN,
         botId: config.telegram.accountId }));
+    }
+    if (config.weixin?.enabled) {
+      routes.set('weixin', new WeixinTransport({ accountId: config.weixin.accountId,
+        secret: config.weixin.credentialRef ? secrets?.weixin : process.env.MAOMAO_DSH_WEIXIN_CREDENTIAL,
+        statePath: join(root, 'weixin', `${digest(['weixin', config.weixin.accountId]).slice(0, 24)}.json`) }));
     }
     return routes;
   }
@@ -220,7 +227,7 @@ export class PrivateConnector {
     const owners = this.#ownerChannels();
     const nicknames = this.#ledger.ownerLabels();
     const sharingConfigured = Boolean(this.#memory && this.#config.memory?.shared !== false);
-    const sharedMemory = sharingConfigured && [...owners.values()].some((platforms) => platforms.size === 2);
+    const sharedMemory = sharingConfigured && [...owners.values()].some((platforms) => platforms.size >= 2);
     return {
       channels,
       memory: Boolean(this.#memory),
@@ -338,7 +345,7 @@ export class PrivateConnector {
         }
       }
     }
-    const counts = { feishu: 0, telegram: 0 };
+    const counts = { feishu: 0, telegram: 0, weixin: 0 };
     return [...targets.values()].sort((a, b) => a.id.localeCompare(b.id)).map((target) => ({
       ...target, label: `${labels[target.kind]} 私聊 ${++counts[target.kind]}`,
     }));
@@ -468,8 +475,9 @@ export class PrivateConnector {
       if (bindingId) {
         const account = accountKey(platform, this.#config[platform].accountId);
         const binding = this.#ledger.panelBindings(account).find((entry) => entry.id === bindingId);
-        const other = platform === 'feishu' ? 'telegram' : 'feishu';
-        if (!binding || owner === binding.owner || !owners.get(owner)?.has(other)) return { status: 'unavailable' };
+        // Linking to an owner who already has another kind of private chat.
+        const other = [...(owners.get(owner) ?? [])].find((kind) => kind !== platform);
+        if (!binding || owner === binding.owner || !other) return { status: 'unavailable' };
         reassign = { route: bindingId, previousOwner: binding.owner, other };
       }
       pairing = { id: randomUUID(), code: randomBytes(12).toString('hex'), owner, reassign,
@@ -971,6 +979,7 @@ export class PrivateConnector {
     const models = this.#ctx.get?.('maomaoModels');
     const reference = messages.findLast((part) => part.image)?.image;
     const canSend = typeof transport.replyMedia === 'function';
+    const canSpeak = canSend && transport.voiceNotes !== false;
     const send = async (media, deadline) => {
       if (!current() || deadline.aborted) return 'cancelled';
       const ticket = this.#ledger.reserve(receipt, 'media');
@@ -1003,7 +1012,7 @@ export class PrivateConnector {
         if (!output) return 'unavailable';
         return send({ ...output, kind: 'image', mediaType: imageMediaType(output.buffer) }, deadline);
       } : null,
-      voice: canSend && models?.mediaChoice?.('voice')?.enabled ? async (text, deadline) => {
+      voice: canSpeak && models?.mediaChoice?.('voice')?.enabled ? async (text, deadline) => {
         const adapter = await models.mediaAdapter('voice');
         if (!adapter) return 'unavailable';
         const audio = await opusVoice(await adapter.synthesize(text, deadline), deadline);
@@ -1126,7 +1135,7 @@ export class PrivateConnector {
       stickerTools?.guidance, learning?.guidance].filter(Boolean).join('\n\n');
     // This turn's reference material: in the system section for this turn only, not in history.
     for (const event of messages) this.#mood.note(route, event.text, event.receivedAt);
-    const reference = turnReference([this.#mood.memo(route), styleNudge(this.#recentReplies.get(route) ?? []), context,
+    const reference = turnReference([this.#mood.memo(route), this.#mood.repeatNudge(route), styleNudge(this.#recentReplies.get(route) ?? []), context,
       learning ? learning.context({ guidance: false }) : '', stickerTools ? stickerTools.context({ guidance: false }) : '',
       previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '',
       messages.some((event, index) => event.media && !(useChatVision && event.image?.mediaType !== 'image/gif') && !inspections[index] && !event.imagePermissionMissing)
@@ -1150,7 +1159,10 @@ export class PrivateConnector {
         signal.throwIfAborted();
         const result = await controller.wait({ sessionId, afterSeq: cursor, timeoutMs: 25_000, maxMessages: 8 }, signal);
         if (result.reason === 'timeout') continue;
-        return result.reason === 'input-required' ? '' : cleanReply(answerFrom(result));
+        if (result.reason === 'input-required') return '';
+        const reply = cleanReply(answerFrom(result));
+        this.#mood.noteLine(route, reply);
+        return reply;
       }
     } finally { try { closeLearning?.(); closeStickers?.(); await closeTools?.(); } finally { closePersona(); } }
   }
@@ -1244,9 +1256,11 @@ export function apply(ctx, config = {}) {
     provisionTelegram,
     verifyFeishu: ({ appId, secret, brand, signal }) => new FeishuTransport({ appId, secret, brand }).verify(signal),
     verifyTelegram: ({ token, signal }) => new TelegramTransport({ token, botId: telegramBotId(token) }).verify(signal),
+    provisionWeixin,
+    verifyWeixin: ({ accountId, secret, signal }) => new WeixinTransport({ accountId, secret }).verify(signal),
   }));
   if (config.enabled !== true || config.dryRun === true) return;
-  const active = ['feishu', 'telegram'].filter((platform) => config[platform]?.enabled === true);
+  const active = ['feishu', 'telegram', 'weixin'].filter((platform) => config[platform]?.enabled === true);
   if (active.some((platform) => !config[platform].credentialRef)
     && process.env.MAOMAO_DSH_PRIVATE_CONNECT !== 'ISOLATED_TEST_OR_HERMES_STOPPED') {
     throw new Error('Private connector requires isolated test credentials or a completed Hermes cutover');

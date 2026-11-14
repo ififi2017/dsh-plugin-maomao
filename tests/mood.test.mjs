@@ -46,3 +46,36 @@ test('replies are cleaned of machine wrappers before sending, keeping the words'
   assert.equal(cleanReply('[QQ 表情：旺柴] 才不要'), '[QQ 表情：旺柴] 才不要');
   assert.equal(cleanReply('列表 [1, 2] 照常'), '列表 [1, 2] 照常');
 });
+
+test('joining a group chat unprompted waits to read and type, a few seconds in all', async () => {
+  const { joinInPause } = await import('../integrations/maomao-dsh/pacing.mjs');
+  const middle = { random: () => 0.5 };
+  const short = joinInPause('增智慧？', '增没增不知道', middle);
+  const long = joinInPause('哼！俺这叫能屈能伸，大度的猫猫才不跟握着电源线的人硬刚呢！', '嘴硬，尾巴毛都炸成鸡毛掸子了还大度嘞！', middle);
+  assert.ok(short >= 2000 && short < long && long <= 8000, `${short} / ${long}`);
+});
+
+test('a running joke used three times in half a day earns a nudge to move on, and fades after', () => {
+  const book = new MoodBook();
+  const t = Date.parse('2026-11-13T16:00:00+08:00');
+  book.noteLine('group', '学猫猫说话可是要交小鱼干的', t);
+  book.noteLine('group', '张嘴闭嘴小鱼干！', t + 60_000);
+  assert.equal(book.repeatNudge('group', t + 120_000), '');
+  book.noteLine('group', '分你半条小鱼干，再来碗烩面', t + 120_000);
+  assert.match(book.repeatNudge('group', t + 180_000), /「小鱼干」/);
+  assert.doesNotMatch(book.repeatNudge('group', t + 180_000), /烩面/);
+  assert.equal(book.repeatNudge('group', t + 13 * 3600_000), '');
+  assert.equal(book.repeatNudge('other', t), '');
+});
+
+test('in a group, 猫猫 is polite with someone new and relaxed with a regular', () => {
+  const book = new MoodBook();
+  const t = Date.parse('2026-11-13T10:00:00+08:00');
+  book.acquaint('group', 'newcomer', t);
+  assert.match(book.familiarity('group', 'newcomer'), /不太熟/);
+  for (let i = 0; i < 4; i++) book.acquaint('group', 'sometimes', t + i * 60_000);
+  assert.match(book.familiarity('group', 'sometimes'), /打过几次交道/);
+  for (let i = 0; i < 16; i++) book.acquaint('group', 'regular', t + i * 2 * 3600_000);
+  assert.match(book.familiarity('group', 'regular'), /熟人/);
+  assert.match(book.familiarity('group', 'never-seen'), /不太熟/);
+});

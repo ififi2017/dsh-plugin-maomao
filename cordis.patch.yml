@@ -60,6 +60,8 @@
         telegram:
           enabled: false
           enrollment: false
+        weixin:
+          enabled: false
         bindings: []
         memory:
           enabled: true
