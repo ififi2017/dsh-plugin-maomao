@@ -76,6 +76,7 @@ export class MaomaoQqConnector {
   #stickerOffered = new Set();
   #steals = new Map();
   #stealNoticeDelayMs = 15_000;
+  #bursts = new Map();
   #shownImages = new Set();
   #dshHome = '';
   #chatFolder;
@@ -469,6 +470,8 @@ export class MaomaoQqConnector {
   }
 
   async stop() {
+    for (const burst of this.#bursts.values()) clearTimeout(burst.timer);
+    this.#bursts.clear();
     this.#stopped = true;
     this.#ready = false;
     this.#abort.abort(new Error('QQ connector stopped'));
@@ -634,7 +637,7 @@ export class MaomaoQqConnector {
     if (envelope.addressed && (envelope.scope === 'c2c' || this.#config.respondToMentions !== false)
       && (envelope.text || priorImage || inboundImage(envelope) || waitsForSplitImage(envelope)
         || envelope.attachments.some((item) => item.asrText))) {
-      this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
+      this.#holdForMore(envelope, ordinaryContext, priorImage, peer);
     } else if (shadowDecision && passiveReplies) {
       void shadowDecision.then((row) => {
         // The judge's reply form travels with the turn; inbound messages are frozen and must not be
@@ -699,6 +702,41 @@ export class MaomaoQqConnector {
       this.#observed.delete(oldest);
       this.#imageDetails.delete(oldest);
     }
+  }
+
+  // How long to wait for someone to finish typing before replying (config replyQuietMs, default 6 s).
+  #replyQuiet() {
+    const env = process.env.MAOMAO_REPLY_QUIET_MS;
+    const value = this.#config.replyQuietMs ?? (env !== undefined && env !== '' ? Number(env) : 6000);
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 20_000) : 6000;
+  }
+
+  // People often send one thought as several short messages. Hold a direct message until its sender
+  // has been quiet for a few seconds, then answer them all as one turn, anchored on the last one.
+  #holdForMore(envelope, ordinaryContext, priorImage, peer) {
+    const quiet = this.#replyQuiet();
+    if (quiet <= 0) return this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
+    const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}:${envelope.senderId}`;
+    const burst = this.#bursts.get(key) ?? { started: Date.now(), items: [] };
+    clearTimeout(burst.timer);
+    burst.items.push({ envelope, ordinaryContext, priorImage });
+    this.#bursts.set(key, burst);
+    const flush = () => {
+      if (this.#bursts.get(key) !== burst) return;
+      this.#bursts.delete(key);
+      const last = burst.items.at(-1);
+      // The last message keeps its own voice transcript and picture; earlier ones contribute their words.
+      const lines = burst.items.map(({ envelope: item }, index) => [item.text,
+        ...(index < burst.items.length - 1 ? item.attachments.filter((a) => a.asrText).map((a) => `[语音转写] ${a.asrText}`) : [])]
+        .filter(Boolean).join('\n')).filter(Boolean);
+      const merged = burst.items.length > 1 ? Object.freeze({ ...last.envelope, text: lines.join('\n').slice(0, 12000) }) : last.envelope;
+      if (merged !== last.envelope) this.#observed.set(merged.receiptKey, merged);
+      this.#queueAnswer(merged, last.ordinaryContext, false, last.priorImage ?? burst.items.findLast((item) => item.priorImage)?.priorImage ?? null, peer);
+    };
+    const cap = Math.min(Math.max(quiet * 3, 3000), 30_000);
+    const remaining = Math.min(quiet, cap - (Date.now() - burst.started));
+    if (burst.items.length >= 12 || remaining <= 0) flush();
+    else burst.timer = setTimeout(flush, remaining);
   }
 
   #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null,
@@ -871,6 +909,7 @@ export class MaomaoQqConnector {
         const after = answer && current()
           && (await this.respond(envelope.receiptKey, answer, { current, limit: envelope.scope === 'group' ? 2 : 3 }).catch(() => [])).length ? answer : '';
         if (after) this.#recentReplies.set(chatKey, [...(this.#recentReplies.get(chatKey) ?? []), after].slice(-8));
+        if (after) this.#steals.delete(chatKey);
         if (chatTools.outcome() === 'sent') learning?.finish({ answer: [chatTools.transcript(), after].filter(Boolean).join('\n'), tools: chatTools.learningOutcomes() });
         return;
       }
@@ -900,6 +939,9 @@ export class MaomaoQqConnector {
         this.#choiceThrottle.noteReply(key, Boolean(card));
         this.#recentReplies.set(key, [...(this.#recentReplies.get(key) ?? []), answer].slice(-8));
         if (this.#recentReplies.size > 200) this.#recentReplies.delete(this.#recentReplies.keys().next().value);
+        // 猫猫 just spoke here: a sticker saved meanwhile is either already mentioned (it may have
+        // collected the same one itself) or the moment has passed. Never add the fallback line after.
+        this.#steals.delete(key);
       }
       if (sent.length) learning?.finish({ answer, tools: [...(chatTools?.learningOutcomes() ?? []), ...(stickerTools?.learningOutcomes() ?? [])] });
       if (!test && !stickerTools && this.#stickers && !card && !choiceProfile && !limit

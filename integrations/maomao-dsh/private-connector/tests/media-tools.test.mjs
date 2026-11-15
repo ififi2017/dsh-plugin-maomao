@@ -99,7 +99,7 @@ test('both private connectors expose native tools with no keyword gate and suppr
   ] }];
   const connector = new PrivateConnector({ sessionController: controller,
     get: (key) => key === 'maomaoModels' ? models : undefined,
-  }, { stateRoot: root, memory: { enabled: false }, bindings,
+  }, { stateRoot: root, replyQuietMs: 0, memory: { enabled: false }, bindings,
     feishu: { accountId: 'cli_test' }, telegram: { accountId: '2000', debounceMs: 0 },
   }, { routes: new Map([['feishu', transport], ['telegram', transport]]) });
   try {

@@ -92,7 +92,7 @@
   ],
   "author": "fi_niaR",
   "scripts": {
-    "test": "node --test tests/*.test.mjs integrations/maomao-dsh/private-connector/tests/*.test.mjs integrations/maomao-dsh/qq-connector/tests/*.test.mjs",
+    "test": "MAOMAO_REPLY_QUIET_MS=0 node --test tests/*.test.mjs integrations/maomao-dsh/private-connector/tests/*.test.mjs integrations/maomao-dsh/qq-connector/tests/*.test.mjs",
     "pack:release": "npm pack --ignore-scripts"
   }
 }

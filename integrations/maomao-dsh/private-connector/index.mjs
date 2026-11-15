@@ -591,20 +591,33 @@ export class PrivateConnector {
     }
     this.#pending += 1;
     const route = scopedRoute(event, owner);
-    if (event.platform === 'telegram' && !command && !test && this.#config.telegram.debounceMs !== 0) {
+    // People often send a thought in several short messages. Wait until they have been quiet for a
+    // few seconds, then answer everything as one turn; a long burst is answered after a cap.
+    const quiet = this.#replyQuiet(event.platform);
+    if (!command && !test && quiet > 0) {
       const burst = this.#bursts.get(route) ?? { started: Date.now(), events: [] };
       clearTimeout(burst.timer);
       burst.events.push({ event, receipt });
-      const quiet = Math.min(Math.max(this.#config.telegram.debounceMs || 1200, 100), 3000);
-      const remaining = Math.min(quiet, 3000 - (Date.now() - burst.started));
+      const cap = Math.min(Math.max(quiet * 3, 3000), 30_000);
+      const remaining = Math.min(quiet, cap - (Date.now() - burst.started));
       this.#bursts.set(route, burst);
-      if (burst.events.length >= 6 || remaining <= 0) this.#flushBurst(route, owner, transport);
+      if (burst.events.length >= 12 || remaining <= 0) this.#flushBurst(route, owner, transport);
       else burst.timer = setTimeout(() => this.#flushBurst(route, owner, transport), remaining);
       return true;
     }
     this.#flushBurst(route, owner, transport);
     this.#queue([{ event, receipt }], transport, owner, test ? { test } : command);
     return true;
+  }
+
+  // How long to wait for someone to finish typing before replying, in ms. A platform's older
+  // debounceMs setting still wins (0 turns waiting off); otherwise replyQuietMs, default 6 s.
+  #replyQuiet(platform) {
+    const legacy = this.#config[platform]?.debounceMs;
+    const env = process.env.MAOMAO_REPLY_QUIET_MS;
+    const value = Number.isFinite(legacy) ? legacy
+      : this.#config.replyQuietMs ?? (env !== undefined && env !== '' ? Number(env) : 6000);
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 20_000) : 6000;
   }
 
   // A paired owner speaking from any chat on this bot account, found through config bindings,

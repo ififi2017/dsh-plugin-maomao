@@ -12,7 +12,7 @@ const inbound = (id, content = '猫猫，你觉得呢？') => ({
   senderId: 'member-a', messageId: id, content, attachments: [],
 });
 
-async function withConnector(delivery, judge, harness, run, ordinary) {
+async function withConnector(delivery, judge, harness, run, ordinary, extra = {}) {
   const root = await mkdtemp(join(tmpdir(), 'maomao-qq-delivery-'));
   const old = [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT];
   process.env.MAOMAO_QQ_APP_ID = 'test-app';
@@ -31,7 +31,7 @@ async function withConnector(delivery, judge, harness, run, ordinary) {
     { sessionController: {}, emit() {}, logger: { warn() {}, error() {} } },
     { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [], typingPace: false,
       shadow: { enabled: true, path: join(root, 'shadow.jsonl'), debounceMs: 1,
-        semantic: { enabled: true }, delivery }, ordinary: { enabled: Boolean(ordinary) } },
+        semantic: { enabled: true }, delivery }, ordinary: { enabled: Boolean(ordinary) }, ...extra },
     { botFactory: () => bot, shadowJudge: judge, harness, ordinary });
   try {
     await connector.start();
@@ -316,4 +316,22 @@ test('猫猫 learns its own group display name from the panel and hears it in gr
       while (asked.length < 2 && Date.now() < end) await delay(50);
       assert.equal(asked[1]?.selfName, '猫猫 2 号');
     });
+});
+
+test('messages sent in a quick burst are answered once, together, after the sender pauses', { timeout: 6_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope) { asked.push(envelope.text); return '中'; } };
+  const at = (id, content) => ({ ...inbound(id, content), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+  await withConnector({ enabled: false, groupAllowlist: [] }, async () => ({ reply: false }), harness,
+    async (connector, sends, firstSend) => {
+      await connector.accept(at('one', '我跟你说'));
+      await delay(150);
+      await connector.accept(at('two', '今天老板又加班'));
+      await delay(150);
+      assert.equal(sends.length, 0, 'still waiting while the person is typing');
+      await connector.accept(at('three', '烦死了'));
+      await firstSend;
+      assert.deepEqual(asked, ['我跟你说\n今天老板又加班\n烦死了']);
+      assert.equal(sends[0].target.msgId, 'three', 'the reply is anchored on the last message');
+    }, undefined, { replyQuietMs: 400 });
 });

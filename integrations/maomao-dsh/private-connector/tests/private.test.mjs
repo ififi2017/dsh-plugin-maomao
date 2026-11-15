@@ -300,7 +300,7 @@ test('panel pairing verifies private ingress before linking a durable owner and 
     async image() { throw Object.assign(new Error('platform details'), { code: 'feishu_media_permission' }); },
     async reply(_event, text) { delivered.push(text); return 'delivered'; },
   };
-  const config = { stateRoot: root, feishu: { accountId: route.accountId },
+  const config = { stateRoot: root, replyQuietMs: 0, feishu: { accountId: route.accountId },
     telegram: { accountId: '2000', debounceMs: 0 }, bindings: [{ owner: 'owner', endpoints: [route] }] };
   const options = { routes: new Map([['feishu', transport], ['telegram', transport]]), mood: daytimeMood() };
   const ctx = { logger: {}, sessionController: { async create() { throw new Error('model unavailable'); } } };
@@ -643,5 +643,39 @@ test('a chat whose session predates the 猫猫的聊天 folder moves to a new se
     assert.deepEqual(prompts, ['session-1', 'session-2', 'session-2']);
     assert.equal(created, 2);
     assert.deepEqual(replies, ['1', '2', '3']);
+  } finally { await connector.stop(); }
+});
+
+test('Lark messages sent in a burst wait for a pause and become one turn with one reply', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-private-quiet-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const endpoint = { platform: 'feishu', accountId: 'cli_test', chatId: 'oc_owner', senderId: 'ou_owner' };
+  const prompts = [];
+  const replies = [];
+  const controller = {
+    async create() { return { sessionId: 'session-a' }; },
+    async projections() { return { values: { agentPreset: PRESET, modelSelection: { next: { provider: 'google' } } } }; },
+    async state() { return { cursor: 0 }; },
+    async prompt(request) { prompts.push(request.content.map((part) => part.text.replace(/^\[[^\]]+\]\s*/, ''))); },
+    // The turn's mood line ("今天好累" makes 猫猫 worried) is mounted as a system section.
+    async resolveAgent() { return { agent: { ctx: { get: () => ({ getSectionOrder: () => 1, section: () => () => {} }) } } }; },
+    async wait() { return { reason: 'idle', output: { records: [{ event: { type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: '听着呢。' }] } } } }] } }; },
+  };
+  const route = { async reply(event) { replies.push(event.messageId); return '90'; } };
+  const connector = new PrivateConnector({ sessionController: controller }, {
+    stateRoot: root, replyQuietMs: 300, memory: { enabled: false }, feishu: { accountId: 'cli_test' },
+    bindings: [{ owner: 'owner', endpoints: [endpoint] }],
+  }, { routes: new Map([['feishu', route]]), mood: daytimeMood() });
+  try {
+    connector.accept({ ...endpoint, messageId: 'om_1', text: '我跟你说', receivedAt: Date.now() });
+    await pause(150);
+    connector.accept({ ...endpoint, messageId: 'om_2', text: '今天好累', receivedAt: Date.now() });
+    await pause(150);
+    assert.equal(prompts.length, 0, 'still waiting while the person types');
+    const end = Date.now() + 2000;
+    while (!replies.length && Date.now() < end) await pause(20);
+    assert.deepEqual(prompts, [['我跟你说', '今天好累']]);
+    assert.deepEqual(replies, ['om_2']);
   } finally { await connector.stop(); }
 });
