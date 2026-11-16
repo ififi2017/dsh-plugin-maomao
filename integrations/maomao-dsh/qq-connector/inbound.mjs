@@ -109,6 +109,17 @@ const faceText = (id, ext) => {
 const FACE_TAG = /\[<face,id=([^>\/\]]*)\/?>\]|<faceType=\d+,faceId="?([^",>]*)"?(?:,ext="?([^">]*)"?)?[^>]*>?/g;
 const rawFaces = (raw) => [...raw.matchAll(FACE_TAG)].map((m) => faceText(m[1] ?? m[2], m[3])).join('');
 
+// "<@0275804B…>" means nothing to the model. Name who was @-mentioned: 猫猫 itself, another bot,
+// a nickname QQ sent, or a short stable tag per group member, so it can tell who is talked to.
+function mentionText(message, id, botId) {
+  const mention = Array.isArray(message.mentions)
+    ? message.mentions.find((item) => item && [item.id, item.member_openid, item.user_openid].includes(id)) : null;
+  if (mention?.is_you === true || id === botId) return '@你';
+  const name = NON_EMPTY(mention?.nickname || mention?.username).slice(0, 32);
+  if (mention?.bot === true) return `@另一个机器人${name ? `「${name}」` : ''}`;
+  return name ? `@${name}` : `@群友${id.slice(-4)}`;
+}
+
 export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
   if (!message || !['group', 'c2c'].includes(message.kind) || message.senderIsBot === true) return null;
   const messageId = NON_EMPTY(message.messageId);
@@ -141,6 +152,7 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
     addressed,
     addressedToOther,
     text: (body
+      .replace(/<@!?([0-9A-Za-z_-]{1,128})>/g, (_, id) => mentionText(message, id, botId))
       .replace(/<faceType=\d+,faceId="([^"]*)",ext="([^"]*)">/g, (_, id, ext) => faceText(id, ext))
       || rawFaces(message.raw?.content ?? ''))
       .slice(0, 12000),

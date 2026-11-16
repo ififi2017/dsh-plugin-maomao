@@ -335,3 +335,48 @@ test('messages sent in a quick burst are answered once, together, after the send
       assert.equal(sends[0].target.msgId, 'three', 'the reply is anchored on the last message');
     }, undefined, { replyQuietMs: 400 });
 });
+
+async function quoteConnector(sendImpl, run) {
+  const { ApiError } = await import('@tencent-connect/qqbot-nodejs');
+  const root = await mkdtemp(join(tmpdir(), 'maomao-qq-quote-'));
+  const old = [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT];
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-app', MAOMAO_QQ_APP_SECRET: 'test-secret', MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return sendImpl(request, ApiError, sends.length); } };
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: { warn() {}, error() {} } },
+    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [], typingPace: false },
+    { botFactory: () => bot, harness: { async ask() { return '收到<|bubble|>稍等我看看'; } } });
+  try {
+    await connector.start();
+    await run(connector, sends);
+  } finally {
+    await connector.stop();
+    [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT] = old;
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('a group reply quotes the message it answers on its first bubble', async () => {
+  await quoteConnector(() => ({ id: 'sent' }), async (connector, sends) => {
+    await connector.accept({ ...inbound('ask-1', '你看这个'), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+    const end = Date.now() + 2000;
+    while (sends.length < 2 && Date.now() < end) await delay(20);
+    assert.deepEqual(sends[0].messageReference, { message_id: 'ask-1' });
+    assert.equal(sends[1].messageReference, undefined, 'later bubbles are not quoted again');
+  });
+});
+
+test('when QQ refuses a quote, the same text goes out once unquoted and later replies stop quoting', async () => {
+  await quoteConnector((request, ApiError) => {
+    if (request.messageReference) throw new ApiError('reference not supported', 400, '/v2/groups/x/messages', 40054001);
+    return { id: 'sent' };
+  }, async (connector, sends) => {
+    await connector.accept({ ...inbound('ask-2', '你看这个'), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+    const end = Date.now() + 2000;
+    while (sends.length < 3 && Date.now() < end) await delay(20);
+    assert.deepEqual(sends.map((s) => [s.content, Boolean(s.messageReference)]),
+      [['收到', true], ['收到', false], ['稍等我看看', false]]);
+  });
+});

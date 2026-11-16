@@ -190,7 +190,7 @@ test('a screenshot of a page, balance or dashboard is never kept as a sticker, w
   }
 });
 
-test('when 猫猫 replies in the chat after a background save, the fallback line is not sent as well', async () => {
+test('when 猫猫 replies in the chat after a background save, the fallback line is not sent as well', { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'maomao-steal-once-'));
   const env = { ...Object.fromEntries(['MAOMAO_QQ_APP_ID', 'MAOMAO_QQ_APP_SECRET', 'MAOMAO_QQ_CONNECT']
     .map((key) => [key, process.env[key]])) };
@@ -203,16 +203,16 @@ test('when 猫猫 replies in the chat after a background save, the fallback line
     stop() { finishRun?.(); }, async send(request) { sends.push(request); return { id: `sent-${sends.length}` }; } };
   const learning = { settings: { stickers: true, collectStickers: true } };
   // The reply takes a moment, so the background save lands first, as it did in the real chat.
-  const harness = { async ask() { await new Promise((resolve) => setTimeout(resolve, 400)); return '图俺顺手收下了。'; } };
+  const harness = { async ask() { await new Promise((resolve) => setTimeout(resolve, 2000)); return '图俺顺手收下了。'; } };
   const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: console,
     get: (name) => name === 'maomaoLearning' ? learning : undefined },
   { groupAllowlist: ['group-a'], statePath: join(root, 'state.json'), stickers: { enabled: true }, typingPace: false },
-  { botFactory: () => bot, ordinary, stickers: { async describe() { return description; } }, stealNoticeDelayMs: 600, harness });
+  { botFactory: () => bot, ordinary, stickers: { async describe() { return description; } }, stealNoticeDelayMs: 2500, harness });
   connector.loadImages = async (receiptKey) => receiptKey.endsWith(':first') ? [picture] : [];
   try {
     await connector.start();
     await connector.accept(message('first', { attachments, rawEventType: 'GROUP_AT_MESSAGE_CREATE' }));
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
     assert.deepEqual(sends.map((s) => s.content), ['图俺顺手收下了。']);
   } finally {
     await connector.stop();

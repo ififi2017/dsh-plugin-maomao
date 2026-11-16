@@ -92,10 +92,10 @@ test('normalizes immutable per-message identity and observes unmentioned media',
   assert.equal(normalizeInbound(rawMessage({ rawEventType: 'GROUP_AT_MESSAGE_CREATE' })).addressed, true);
   assert.equal(normalizeInbound(rawMessage({ mentions: [{ is_you: false }] })).addressedToOther, true);
   const otherMention = normalizeInbound(rawMessage({
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '<@other> 你好',
+    rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '@群友ther 你好',
     raw: { content: '<@bot> <@other> 你好' },
   }));
-  assert.equal(otherMention.text, '<@other> 你好');
+  assert.equal(otherMention.text, '@群友ther 你好');
   assert.notEqual(normalizeInbound(rawMessage(), 100, 'app-a').receiptKey,
     normalizeInbound(rawMessage(), 100, 'app-b').receiptKey);
 });

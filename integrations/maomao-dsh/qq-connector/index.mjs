@@ -78,6 +78,7 @@ export class MaomaoQqConnector {
   #stealNoticeDelayMs = 15_000;
   #bursts = new Map();
   #stealMentions = new Map();
+  #quoteDenied = new Set();
   #shownImages = new Set();
   #dshHome = '';
   #chatFolder;
@@ -644,7 +645,7 @@ export class MaomaoQqConnector {
         // The judge's reply form travels with the turn; inbound messages are frozen and must not be
         // written to (doing so threw and silently dropped every unprompted group reply).
         if (row?.decision === 'would_reply' && this.#shadow?.isLatest(envelope)) {
-          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer, { replyForm: row.form ?? null });
+          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer, { replyForm: row.form ?? null, aside: row.aside === true });
         }
       }).catch((error) => {
         this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error));
@@ -741,7 +742,7 @@ export class MaomaoQqConnector {
   }
 
   #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null,
-    { peerTurn = null, peerCurrent = null, replyForm = null } = {}, choiceProfile = null, test = null) {
+    { peerTurn = null, peerCurrent = null, replyForm = null, aside = false } = {}, choiceProfile = null, test = null) {
     const queued = this.#enqueue(envelope, async () => {
       const turnStart = Date.now();
       const profile = channelPersona(this.#ctx, personaTarget(envelope));
@@ -873,6 +874,7 @@ export class MaomaoQqConnector {
       if (!test && !peerTurn && envelope.scope === 'c2c') void this.#typing(envelope);
       const reply = await this.#harness.ask(envelope, {
         replyForm,
+        aside,
         selfName: envelope.scope === 'group' ? this.#groupSelfName(envelope.chatId) : '',
         images,
         imageDescription,
@@ -930,7 +932,8 @@ export class MaomaoQqConnector {
         if (!current()) return;
       }
       test?.('sending');
-      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn) }).catch((error) => {
+      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn),
+        quote: envelope.scope === 'group' && !peerTurn && !test }).catch((error) => {
         test?.('delivery_failed');
         throw error;
       });
@@ -1232,7 +1235,7 @@ export class MaomaoQqConnector {
     return this.#imageInFlight.get(receiptKey);
   }
 
-  async respond(receiptKey, text, { current = () => true, limit, card = null, optional = false } = {}) {
+  async respond(receiptKey, text, { current = () => true, limit, card = null, optional = false, quote = false } = {}) {
     const envelope = this.#observed.get(receiptKey);
     if (!envelope || !this.#allowed(envelope) || Date.now() - envelope.receivedAt > 10 * 60_000) {
       throw new Error('QQ inbound receipt is unavailable');
@@ -1264,7 +1267,7 @@ export class MaomaoQqConnector {
             keyboard = choiceKeyboard(token, options, envelope.senderId);
           }
         }
-        const messageId = await this.#sendText(anchor, part, ticket.seq, stillAllowed, keyboard, options);
+        const messageId = await this.#sendText(anchor, part, ticket.seq, stillAllowed, keyboard, options, quote && index === 0);
         await this.#state.finish(ticket.key, messageId);
         if (!messageId && !stillAllowed()) break;
         if (!messageId) throw new Error('QQ send result did not include a message id');
@@ -1290,11 +1293,33 @@ export class MaomaoQqConnector {
     } catch (error) { this.#logger.debug?.('QQ typing notice failed', errorLabel(error)); log('debug', 'qq', '输入状态发送失败', errorLabel(error)); }
   }
 
-  async #sendText(envelope, content, seq, current = () => true, keyboard, choices) {
+  async #sendText(envelope, content, seq, current = () => true, keyboard, choices, quote = false) {
     const options = {
       target: { scope: envelope.scope, targetId: envelope.chatId, msgId: envelope.messageId },
       extra: { msg_seq: seq },
     };
+    // A plain-text group reply can quote the message it answers (QQ message_reference; Tencent's SDK
+    // adds it only to plain text). Markdown and button cards go out unquoted.
+    const quoting = quote && this.#config.quoteReplies !== false && !this.#quoteDenied.has(envelope.scope);
+    return this.#sendWith(envelope, content, options, current, keyboard, choices, quoting);
+  }
+
+  // Plain text with a quote; if QQ refuses it but takes the same text unquoted, quoting stays off here.
+  async #sendQuoted(envelope, request, current) {
+    try {
+      return await this.#bot.send({ ...request, messageReference: { message_id: envelope.messageId } });
+    } catch (error) {
+      if (!(error instanceof ApiError) || !current()) throw error;
+      const result = await this.#bot.send(request);
+      const code = Number(error.bizCode ?? 0);
+      this.#quoteDenied.add(envelope.scope);
+      log('warn', 'qq', 'QQ 不接受引用回复，改为不引用', { code, scope: envelope.scope });
+      apiError('qq', code, 'QQ 拒绝了引用回复，改发不带引用的消息');
+      return result;
+    }
+  }
+
+  async #sendWith(envelope, content, options, current, keyboard, choices, quoting) {
     if (!current()) return '';
     this.#shadow?.noteOutbound(envelope, content);
     const plain = plainChatMarkdown(content);
@@ -1316,7 +1341,8 @@ export class MaomaoQqConnector {
         if (!current()) return '';
       }
     }
-    const result = await this.#bot.send({ ...options, content: plain + choiceText, msgType: MsgType.TEXT });
+    const textRequest = { ...options, content: plain + choiceText, msgType: MsgType.TEXT };
+    const result = quoting ? await this.#sendQuoted(envelope, textRequest, current) : await this.#bot.send(textRequest);
     return typeof result?.id === 'string' ? result.id : '';
   }
 }
