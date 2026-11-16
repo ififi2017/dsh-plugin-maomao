@@ -57,6 +57,12 @@ export class PrivateLedger {
     return this.session(route);
   }
 
+  // Move a chat to a new session (one replaced on purpose, e.g. moved into the 猫猫的聊天 folder).
+  rebind(route, session) {
+    this.#db.prepare('INSERT OR REPLACE INTO sessions VALUES (?,?)').run(route, session);
+    return this.session(route);
+  }
+
   reserve(receipt, segment) {
     const key = digest([receipt, segment]);
     return this.#db.prepare("INSERT OR IGNORE INTO sends VALUES (?,?,'reserved',NULL)")

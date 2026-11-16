@@ -2,7 +2,7 @@
 
 # 猫猫 · Maomao for DSH
 
-猫猫是一个适用于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的开源聊天伙伴插件。你可以在 DSH 里直接和猫猫聊天，也可以把自己的 QQ、Telegram 或 Lark / 飞书机器人接进同一个控制面板。
+猫猫是一个适用于 [DeepSeek Harness（DSH）](https://github.com/deepseek-ai/deepseek-harness) 的开源聊天伙伴插件。你可以在 DSH 里直接和猫猫聊天，也可以把自己的 QQ、Telegram、Lark / 飞书机器人或微信 ClawBot 接进同一个控制面板。
 
 - **桌面聊天**：新建会话时选择「猫猫」预设，即可使用内置人格和独立的本地记忆。
 - **聊天平台**：在面板里接入自己的 Bot、绑定会话，再验证首条回复。私聊和群聊都可以用。
@@ -16,18 +16,18 @@
 
 目前验证的 DSH 版本为 **`0.2.2-rc.2`**，插件接受 DSH 0.2.x（不低于 `0.2.2-rc.1`）；DSH 0.3 发布后需要重新验证。请先在 DSH 的模型设置中准备一个可用的对话模型。使用外部渠道的记忆和分享功能时，还需要系统可调用的 Python 3；表情包需要 [Pillow](https://pillow.readthedocs.io/)。
 
-在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.28`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
+在桌面端打开「插件 → 安装第三方插件」，输入 `maomao-dsh-panel@0.2.29`，安装后按提示重启。也可以下载并导入 `.tgz` 安装包。[GitHub Releases](https://github.com/ififi2017/dsh-plugin-maomao/releases)
 
-Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.28)
+Web 版可以用 DSH 命令行从 npm 安装固定版本。[npm 包](https://www.npmjs.com/package/maomao-dsh-panel/v/0.2.29)
 
 ```sh
-dsh plugin --profile web add maomao-dsh-panel@0.2.28
+dsh plugin --profile web add maomao-dsh-panel@0.2.29
 ```
 
 也可以从 GitHub 安装同一个版本。
 
 ```sh
-dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.28'
+dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.29'
 ```
 
 ### 2. 在 DSH 里聊天
@@ -43,6 +43,7 @@ dsh plugin --profile web add 'github:ififi2017/dsh-plugin-maomao#v0.2.28'
 | Lark / 飞书 | 选对 Lark 或飞书版本，扫码创建应用，或导入已有 App ID 和 App Secret。应用需启用机器人能力和长连接事件，并发布版本 | 在目标私聊发配对指令，把 Bot 回的确认码填回面板 |
 | Telegram | 在 [BotFather](https://t.me/BotFather) 创建 Bot，将 Token 填到面板。已有开启管理模式的 Bot 也可以扫码创建 | 打开配对链接点 Start，或在私聊发配对指令，再填确认码 |
 | QQ | 扫码授权或导入 App ID 和 App Secret。先确认同一个 Bot 只由一个实例连接 | 选择群或私聊。群内先 @Bot，再发送配对指令，最后填确认码 |
+| 微信 | 微信里需要有「我 → 设置 → 插件 → ClawBot」入口。在面板选「微信扫码连接 ClawBot」，用要和猫猫聊天的那个微信扫码确认。只支持私聊，不发语音条 | 在微信私聊发配对指令，再填确认码；可关联到已有主人共享记忆 |
 
 绑定后进入「测试回复」，点「生成测试消息」，把带编号的整句发到选定会话（QQ 群内需要 @Bot）。面板会显示同一条消息的收件、模型和投递结果。
 

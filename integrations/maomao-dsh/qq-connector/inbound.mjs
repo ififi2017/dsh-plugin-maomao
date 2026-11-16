@@ -92,8 +92,33 @@ function stripLeadingBotMention(message, text, botId) {
 // QQ faces arrive as IDs. Naming them lets the model know which face was sent ([QQ 表情：旺柴]).
 // Names from dafeiyu-astrbot's face_map.json (MIT), keyed by the QQ face ID.
 const QQ_FACES = JSON.parse(readFileSync(new URL('./qq-faces.json', import.meta.url), 'utf8'));
-const faceText = (id) => QQ_FACES[id] ? `[QQ 表情：${QQ_FACES[id]}]` : '[QQ 表情]';
-const rawFaces = (raw) => [...raw.matchAll(/\[<face,id=(\d+)\/?>\]|<faceType=\d+,faceId="?(\d+)/g)].map((m) => faceText(m[1] ?? m[2])).join('');
+// Store stickers (表情商店) use non-numeric IDs; their ext may carry a base64 JSON with the name.
+const extName = (ext) => {
+  try {
+    const value = JSON.parse(Buffer.from(String(ext ?? ''), 'base64').toString('utf8'));
+    const name = [value?.text, value?.name, value?.summary, value?.desc].find((item) => typeof item === 'string' && item.trim());
+    return name ? name.replace(/^\[|\]$/g, '').trim().slice(0, 20) : '';
+  } catch { return ''; }
+};
+const faceText = (id, ext) => {
+  if (QQ_FACES[id]) return `[QQ 表情：${QQ_FACES[id]}]`;
+  const name = extName(ext);
+  return name ? `[QQ 表情：${name}]` : '[QQ 表情]';
+};
+// Every face tag counts, whatever its ID looks like: a message of only a store sticker is not empty.
+const FACE_TAG = /\[<face,id=([^>\/\]]*)\/?>\]|<faceType=\d+,faceId="?([^",>]*)"?(?:,ext="?([^">]*)"?)?[^>]*>?/g;
+const rawFaces = (raw) => [...raw.matchAll(FACE_TAG)].map((m) => faceText(m[1] ?? m[2], m[3])).join('');
+
+// "<@0275804B…>" means nothing to the model. Name who was @-mentioned: 猫猫 itself, another bot,
+// a nickname QQ sent, or a short stable tag per group member, so it can tell who is talked to.
+function mentionText(message, id, botId) {
+  const mention = Array.isArray(message.mentions)
+    ? message.mentions.find((item) => item && [item.id, item.member_openid, item.user_openid].includes(id)) : null;
+  if (mention?.is_you === true || id === botId) return '@你';
+  const name = NON_EMPTY(mention?.nickname || mention?.username).slice(0, 32);
+  if (mention?.bot === true) return `@另一个机器人${name ? `「${name}」` : ''}`;
+  return name ? `@${name}` : `@群友${id.slice(-4)}`;
+}
 
 export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
   if (!message || !['group', 'c2c'].includes(message.kind) || message.senderIsBot === true) return null;
@@ -127,7 +152,8 @@ export function normalizeInbound(message, receivedAt = Date.now(), botId = '') {
     addressed,
     addressedToOther,
     text: (body
-      .replace(/<faceType=\d+,faceId="([^"]*)",ext="[^"]*">/g, (_, id) => faceText(id))
+      .replace(/<@!?([0-9A-Za-z_-]{1,128})>/g, (_, id) => mentionText(message, id, botId))
+      .replace(/<faceType=\d+,faceId="([^"]*)",ext="([^"]*)">/g, (_, id, ext) => faceText(id, ext))
       || rawFaces(message.raw?.content ?? ''))
       .slice(0, 12000),
     attachments: Object.freeze(attachments),
@@ -156,15 +182,28 @@ export function textBubbles(text, maximum = 4) {
 
 // People often post a few pictures and then ask about them in a separate message
 // ("分析一下是谁全责"). Pick that sender's own recent pictures, oldest first.
-export function recentImagesFrom(envelope, receipts, max = 3, windowMs = 120_000) {
+// Words that point at a picture or ask about it ("分析下", "这是啥", "评价一下").
+const ASKS_ABOUT_IMAGE = /分析|评价|点评|锐评|銳評|看看|看下|看一下|瞅瞅|这是|这啥|啥意思|什么意思|怎么样|对吗|对不对|图里|图上|截图|识别/;
+export const refersToImage = (text) => IMAGE_REFERENCE.test(text ?? '') || ASKS_ABOUT_IMAGE.test(text ?? '');
+// QQ marks a posted sticker with 【表情…】; a plain photo or screenshot arrives with no text at all.
+const STICKER_MARK = /【表情[^】]*】|\[QQ 表情[^\]]*\]/;
+const stickerOnly = (source) => STICKER_MARK.test(String(source.text ?? ''))
+  && !String(source.text).replace(new RegExp(STICKER_MARK.source, 'g'), '').trim();
+
+// The same person's pictures from just before, for a question sent separately ("picture, then
+// '分析下'"). A picture rides along only once: not again with every later line, and an unrelated
+// remark only picks up a fresh, unanswered picture that is not a sticker.
+export function recentImagesFrom(envelope, receipts, max = 3, windowMs = 120_000, { shown = new Set(), freshMs = 45_000 } = {}) {
   if (inboundImage(envelope) || !envelope.senderId) return [];
+  const asks = refersToImage(envelope.text);
   const found = [];
   for (const source of receipts) {
     const age = envelope.receivedAt - source.receivedAt;
     if (source.receiptKey === envelope.receiptKey || age < 0 || age > windowMs
       || source.botId !== envelope.botId || source.scope !== envelope.scope || source.chatId !== envelope.chatId
-      || source.senderId !== envelope.senderId
+      || source.senderId !== envelope.senderId || shown.has(source.receiptKey)
       || !source.attachments.some((item) => item.kind === 'image' && item.sourceUrl)) continue;
+    if (!asks && (age > freshMs || stickerOnly(source))) continue;
     found.push(source);
   }
   return found.sort((a, b) => a.receivedAt - b.receivedAt).slice(-max);

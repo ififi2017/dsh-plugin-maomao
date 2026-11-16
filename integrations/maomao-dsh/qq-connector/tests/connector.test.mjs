@@ -92,10 +92,10 @@ test('normalizes immutable per-message identity and observes unmentioned media',
   assert.equal(normalizeInbound(rawMessage({ rawEventType: 'GROUP_AT_MESSAGE_CREATE' })).addressed, true);
   assert.equal(normalizeInbound(rawMessage({ mentions: [{ is_you: false }] })).addressedToOther, true);
   const otherMention = normalizeInbound(rawMessage({
-    rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '<@other> 你好',
+    rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '@群友ther 你好',
     raw: { content: '<@bot> <@other> 你好' },
   }));
-  assert.equal(otherMention.text, '<@other> 你好');
+  assert.equal(otherMention.text, '@群友ther 你好');
   assert.notEqual(normalizeInbound(rawMessage(), 100, 'app-a').receiptKey,
     normalizeInbound(rawMessage(), 100, 'app-b').receiptKey);
 });
@@ -599,4 +599,29 @@ test('QQ chat and judge sessions rotate after their turn or age limit, and old u
     const reloaded = await new ConnectorState(join(root, 'state.json')).load();
     assert.equal(reloaded.sessionMeta('bot', 'group', 'g').startedAt, 9_000);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('a picture sent to 猫猫 is answered as a message, not narrated back, unless they ask about it', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'maomao-qq-picture-'));
+  try {
+    const state = await new ConnectorState(join(directory, 'state.json')).load();
+    const sections = [];
+    const controller = {
+      async create() { return { sessionId: 'session-one' }; },
+      async projections() { return { values: { agentPreset: 'maomao-qq-ordinary' } }; },
+      async state() { return { cursor: 7 }; },
+      async prompt() { return { accepted: true }; },
+      async resolveAgent() { return { agent: { ctx: { get: (name) => name === 'systemPrompt'
+        ? { getSectionOrder: () => 0, section: (value) => { sections.push(value.text); return () => {}; } } : undefined } } }; },
+      async wait() { return { reason: 'idle', output: { records: [{ event: {
+        type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '噗' }] } } } }] } }; },
+    };
+    const bridge = new HarnessConversation(controller, state, { workspace: directory });
+    const image = { type: 'image', mediaType: 'image/png', data: 'aGk=' };
+    const envelope = normalizeInbound(rawMessage({ rawEventType: 'GROUP_AT_MESSAGE_CREATE', content: '' }));
+    await bridge.ask(envelope, { images: [image] });
+    assert.match(sections.at(-1), /对方发图是在跟你说话/);
+    await bridge.ask({ ...envelope, messageId: 'm2', text: '分析一下' }, { images: [image] });
+    assert.doesNotMatch(sections.at(-1), /对方发图是在跟你说话/, 'asked to analyse: describing is fine');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

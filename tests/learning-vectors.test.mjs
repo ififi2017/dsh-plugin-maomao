@@ -52,3 +52,19 @@ test('without an embedding model the index reports disabled and search stays key
   t.after(() => { runtime.close(); rmSync(root, { recursive: true, force: true }); });
   assert.deepEqual(await runtime.vectorIndex('read'), { status: 'disabled' });
 });
+
+test('the panel learns whose memory each entry is: the owner, a name the platform sent, or only a fingerprint', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'maomao-learning-people-'));
+  const runtime = new LearningRuntime({ get() {} }, { root, delay: 1 });
+  t.after(() => { runtime.close(); rmSync(root, { recursive: true, force: true }); });
+  const open = (subject, name, owner = false) => runtime.open({ namespace: 'qq', scope: 'group-a', subject, name, owner,
+    platform: 'qq', label: 'QQ 群 · test', text: '大家好呀', sourceId: `turn-${subject}`, signal: new AbortController().signal, current: () => true });
+  const bot = open('member-openid-1', '大肥鱼');
+  open('member-openid-2', '');
+  open('owner-openid', '', true);
+  const people = runtime.panel({ action: 'read', sourceId: bot.scopeId }).people;
+  const byName = Object.values(people);
+  assert.deepEqual(byName.map((p) => p.name).sort(), ['', '', '大肥鱼']);
+  assert.equal(byName.filter((p) => p.owner).length, 1);
+  assert.ok(Object.keys(people).every((subject) => /^[a-f0-9]{16}$/.test(subject)), 'only fingerprints are stored, never the raw ID');
+});

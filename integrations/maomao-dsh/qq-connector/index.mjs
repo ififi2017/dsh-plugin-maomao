@@ -3,7 +3,7 @@ import { chatSeesImages, chatSelection, completeText } from '../model-call.mjs';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { setTimeout as wait } from 'node:timers/promises';
-import { typingPause } from '../pacing.mjs';
+import { joinInPause, typingPause } from '../pacing.mjs';
 import { ApiError, MediaFileType, MsgType, QQBot, contentSanitizer } from '@tencent-connect/qqbot-nodejs';
 import { apiError, log } from '../debug-log.mjs';
 
@@ -76,6 +76,10 @@ export class MaomaoQqConnector {
   #stickerOffered = new Set();
   #steals = new Map();
   #stealNoticeDelayMs = 15_000;
+  #bursts = new Map();
+  #stealMentions = new Map();
+  #quoteDenied = new Set();
+  #shownImages = new Set();
   #dshHome = '';
   #chatFolder;
   #imageInFlight = new Map();
@@ -330,20 +334,48 @@ export class MaomaoQqConnector {
       paused: saved?.paused === true, maxRounds: saved?.maxRounds ?? 2, waitMs: legacy?.waitMs };
   }
 
-  peerGroups() {
-    return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
-      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId) }));
+  // Unprompted replies in a group: the panel switch once saved; before that, the config lists
+  // (shadow.semantic + shadow.delivery groupAllowlist) or an enabled group interaction, as before.
+  #groupPassive(chatId) {
+    if (!this.#shadow) return false;
+    const saved = this.#state.peerSettings(this.#appId, chatId);
+    if (saved?.paused === true) return false;
+    if (typeof saved?.passive === 'boolean') return saved.passive;
+    const delivery = this.#config.shadow?.delivery;
+    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
+    const listed = delivery?.enabled === true && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(chatId)
+      && this.#config.shadow?.semantic?.enabled === true && (!Array.isArray(judgeGroups) || judgeGroups.includes(chatId));
+    return listed || this.#groupPeer(chatId).enabled;
   }
 
-  async savePeerGroup({ id, enabled, maxRounds, paused }) {
+  peerGroups() {
+    return this.personaTargets().filter(({ kind, groupOpenId }) => kind === 'qq-group' && groupOpenId)
+      .map(({ id, label, groupOpenId }) => ({ id, label, ...this.#groupPeer(groupOpenId), selfName: this.#groupSelfName(groupOpenId),
+        passive: typeof this.#state.peerSettings(this.#appId, groupOpenId)?.passive === 'boolean'
+          ? this.#state.peerSettings(this.#appId, groupOpenId).passive : this.#groupPassive(groupOpenId) }));
+  }
+
+  // 猫猫's display name in a group (e.g. "猫猫 2 号" beside another bot called 猫猫): the panel
+  // setting once saved, else the older shadow.delivery.peers[group].selfName config.
+  #groupSelfName(chatId) {
+    const saved = this.#state.peerSettings(this.#appId, chatId)?.selfName;
+    if (typeof saved === 'string') return saved;
+    const legacy = this.#config.shadow?.delivery?.peers?.[chatId]?.selfName;
+    return typeof legacy === 'string' ? legacy.trim().slice(0, 24) : '';
+  }
+
+  async savePeerGroup({ id, enabled, maxRounds, paused, passive, selfName }) {
     const group = this.personaTargets().find((target) => target.id === id && target.kind === 'qq-group');
     if (!group?.groupOpenId || !this.#shadow) return { status: 'unavailable' };
-    if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5) {
+    if (typeof enabled !== 'boolean' || typeof paused !== 'boolean' || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 5
+      || (passive !== undefined && typeof passive !== 'boolean')
+      || (selfName !== undefined && (typeof selfName !== 'string' || selfName.length > 24 || /[\x00-\x1f<>]/.test(selfName)))) {
       return { status: 'invalid' };
     }
     this.#shadow.cancelPeer({ botId: this.#appId, chatId: group.groupOpenId });
     await this.#state.savePeerSettings(this.#appId, group.groupOpenId, {
-      enabled, paused, maxRounds,
+      enabled, paused, maxRounds, ...(passive !== undefined ? { passive } : {}),
+      ...(selfName !== undefined ? { selfName: selfName.trim() } : {}),
     });
     return { status: 'saved' };
   }
@@ -440,6 +472,8 @@ export class MaomaoQqConnector {
   }
 
   async stop() {
+    for (const burst of this.#bursts.values()) clearTimeout(burst.timer);
+    this.#bursts.clear();
     this.#stopped = true;
     this.#ready = false;
     this.#abort.abort(new Error('QQ connector stopped'));
@@ -463,14 +497,10 @@ export class MaomaoQqConnector {
 
   async accept(message) {
     if (this.#stopped) return false;
-    const delivery = this.#config.shadow?.delivery;
-    const passiveGroup = message?.kind === 'group' && delivery?.enabled === true
-      && Array.isArray(delivery.groupAllowlist) && delivery.groupAllowlist.includes(message.groupOpenid);
     const peerSettings = message?.kind === 'group' ? this.#groupPeer(message.groupOpenid) : null;
     const peer = peerSettings?.enabled ? peerSettings : null;
-    const judgeGroups = this.#config.shadow?.semantic?.groupAllowlist;
-    const allowJudgment = this.#config.shadow?.semantic?.enabled === true
-      && (!Array.isArray(judgeGroups) || judgeGroups.includes(message?.groupOpenid));
+    // Whether the cat may join this group's conversation without being @-mentioned.
+    const passiveReplies = message?.kind === 'group' && this.#groupPassive(message.groupOpenid);
     if (message?.senderIsBot === true && peer) {
       const group = { botId: this.#appId, scope: 'group', chatId: message.groupOpenid };
       if (!this.#allowed(group) || message.senderId === this.#appId) return false;
@@ -585,13 +615,13 @@ export class MaomaoQqConnector {
     // The model decides what is worth learning; no keyword or fixed imitation rules.
     if (envelope.scope === 'group' && !envelope.addressed && this.#config.ordinary?.enabled === true && envelope.text && !envelope.text.startsWith('/')) {
       this.#ctx.get?.('maomaoLearning')?.open({ namespace: 'qq', scope: qqMemoryScope(envelope),
-        subject: envelope.senderId, owner: this.#isOwner(envelope), label: `QQ 群 · ${envelope.chatId.slice(-8)}`, platform: 'qq',
+        subject: envelope.senderId, name: envelope.senderName, owner: this.#isOwner(envelope), label: `QQ 群 · ${envelope.chatId.slice(-8)}`, platform: 'qq',
         text: envelope.text, sourceId: envelope.receiptKey, signal: this.#abort.signal,
         current: () => !this.#stopped && this.#allowed(envelope),
       })?.finish();
     }
     const shadowDecision = this.#shadow?.observe(envelope, {
-      hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment,
+      hasReferencedImage: Boolean(priorImage || envelope.quotedImages.length), peer, allowJudgment: passiveReplies,
     }) ?? null;
     if (shadowDecision) void shadowDecision.catch((error) =>
       this.#logger.warn?.('QQ shadow unavailable:', errorLabel(error)));
@@ -609,14 +639,18 @@ export class MaomaoQqConnector {
     if (envelope.addressed && (envelope.scope === 'c2c' || this.#config.respondToMentions !== false)
       && (envelope.text || priorImage || inboundImage(envelope) || waitsForSplitImage(envelope)
         || envelope.attachments.some((item) => item.asrText))) {
-      this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
-    } else if (shadowDecision && (passiveGroup && allowJudgment || peer && !peer.paused)) {
+      this.#holdForMore(envelope, ordinaryContext, priorImage, peer);
+    } else if (shadowDecision && passiveReplies) {
       void shadowDecision.then((row) => {
+        // The judge's reply form travels with the turn; inbound messages are frozen and must not be
+        // written to (doing so threw and silently dropped every unprompted group reply).
         if (row?.decision === 'would_reply' && this.#shadow?.isLatest(envelope)) {
-          if (row.form) envelope.replyForm = row.form;
-          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer);
+          this.#queueAnswer(envelope, ordinaryContext, true, priorImage, peer, { replyForm: row.form ?? null, aside: row.aside === true });
         }
-      }).catch((error) => this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error)));
+      }).catch((error) => {
+        this.#logger.warn?.('QQ passive delivery unavailable:', errorLabel(error));
+        log('warn', 'qq', '主动接话没能开始', errorLabel(error));
+      });
     }
     // Every posted picture gets a quick look in the background, the way a person notices a sticker
     // in passing; likely stickers are kept quietly and mentioned (or not) on the cat's next turn.
@@ -672,9 +706,45 @@ export class MaomaoQqConnector {
     }
   }
 
+  // How long to wait for someone to finish typing before replying (config replyQuietMs, default 6 s).
+  #replyQuiet() {
+    const env = process.env.MAOMAO_REPLY_QUIET_MS;
+    const value = this.#config.replyQuietMs ?? (env !== undefined && env !== '' ? Number(env) : 6000);
+    return Number.isFinite(value) ? Math.min(Math.max(value, 0), 20_000) : 6000;
+  }
+
+  // People often send one thought as several short messages. Hold a direct message until its sender
+  // has been quiet for a few seconds, then answer them all as one turn, anchored on the last one.
+  #holdForMore(envelope, ordinaryContext, priorImage, peer) {
+    const quiet = this.#replyQuiet();
+    if (quiet <= 0) return this.#queueAnswer(envelope, ordinaryContext, false, priorImage, peer);
+    const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}:${envelope.senderId}`;
+    const burst = this.#bursts.get(key) ?? { started: Date.now(), items: [] };
+    clearTimeout(burst.timer);
+    burst.items.push({ envelope, ordinaryContext, priorImage });
+    this.#bursts.set(key, burst);
+    const flush = () => {
+      if (this.#bursts.get(key) !== burst) return;
+      this.#bursts.delete(key);
+      const last = burst.items.at(-1);
+      // The last message keeps its own voice transcript and picture; earlier ones contribute their words.
+      const lines = burst.items.map(({ envelope: item }, index) => [item.text,
+        ...(index < burst.items.length - 1 ? item.attachments.filter((a) => a.asrText).map((a) => `[语音转写] ${a.asrText}`) : [])]
+        .filter(Boolean).join('\n')).filter(Boolean);
+      const merged = burst.items.length > 1 ? Object.freeze({ ...last.envelope, text: lines.join('\n').slice(0, 12000) }) : last.envelope;
+      if (merged !== last.envelope) this.#observed.set(merged.receiptKey, merged);
+      this.#queueAnswer(merged, last.ordinaryContext, false, last.priorImage ?? burst.items.findLast((item) => item.priorImage)?.priorImage ?? null, peer);
+    };
+    const cap = Math.min(Math.max(quiet * 3, 3000), 30_000);
+    const remaining = Math.min(quiet, cap - (Date.now() - burst.started));
+    if (burst.items.length >= 12 || remaining <= 0) flush();
+    else burst.timer = setTimeout(flush, remaining);
+  }
+
   #queueAnswer(envelope, ordinaryContext, passive, priorImage, peer = null,
-    { peerTurn = null, peerCurrent = null } = {}, choiceProfile = null, test = null) {
+    { peerTurn = null, peerCurrent = null, replyForm = null, aside = false } = {}, choiceProfile = null, test = null) {
     const queued = this.#enqueue(envelope, async () => {
+      const turnStart = Date.now();
       const profile = channelPersona(this.#ctx, personaTarget(envelope));
       if (envelope.receivedAt < profile.changedAt || (choiceProfile && choiceProfile !== profile.token)) return;
       const current = () => !this.#stopped && this.#allowed(envelope) && profile.current()
@@ -690,8 +760,13 @@ export class MaomaoQqConnector {
       }
       // When the question has no picture of its own, look at what the same person just posted.
       const recentImages = !test && !peerTurn && !linkedImage && !inboundImage(envelope)
-        ? recentImagesFrom(envelope, this.#observed.values(), 3) : [];
+        ? recentImagesFrom(envelope, this.#observed.values(), 3, 120_000, { shown: this.#shownImages }) : [];
       linkedImage ??= recentImages.at(-1) ?? null;
+      // Remember which pictures a turn has already looked at, so they are not attached again.
+      for (const seen of [envelope, linkedImage, ...recentImages]) {
+        if (seen?.receiptKey && inboundImage(seen)) this.#shownImages.add(seen.receiptKey);
+      }
+      if (this.#shownImages.size > 500) this.#shownImages.delete(this.#shownImages.values().next().value);
       const source = linkedImage ?? envelope;
       const attachment = inboundImage(source);
       const quoted = !peerTurn && attachment && source.quotedImages?.includes(attachment);
@@ -768,7 +843,7 @@ export class MaomaoQqConnector {
           ? { namespace: 'private', scope: ownerMemory.scope, subject: linkedOwner, owner: true, label: ownerMemory.label,
             platform: ownerMemory.platform, text: learningText, sourceId: envelope.receiptKey, current, signal }
           : { namespace: 'qq', scope: qqMemoryScope(envelope),
-            subject: envelope.senderId, owner: this.#isOwner(envelope),
+            subject: envelope.senderId, name: envelope.senderName, owner: this.#isOwner(envelope),
             label: `QQ ${envelope.scope === 'group' ? '群' : '私聊'} · ${envelope.chatId.slice(-8)}`, platform: 'qq',
             // An image-only turn still gets the memory tools, so the model never meets an unknown tool.
             text: learningText, sourceId: envelope.receiptKey, current, signal }) : null;
@@ -795,9 +870,12 @@ export class MaomaoQqConnector {
       const choices = !test && envelope.scope === 'group' && !passive
         && this.#config.markdownSupport !== false && !this.#markdownDenied.has('group') && this.#choiceThrottle.allow(chatKey);
       log('info', 'qq', `${envelope.scope === 'group' ? '群' : '私聊'}回合${peerTurn ? '（接机器人）' : passive ? '（主动接话）' : ''}`,
-        { chat: envelope.chatId.slice(-6), text: (peerTurn?.text ?? envelope.text).slice(0, 200), images: images.length, directVision, form: envelope.replyForm ?? peerTurn?.form ?? null, choices });
+        { chat: envelope.chatId.slice(-6), text: (peerTurn?.text ?? envelope.text).slice(0, 200), images: images.length, directVision, form: replyForm ?? peerTurn?.form ?? null, choices });
       if (!test && !peerTurn && envelope.scope === 'c2c') void this.#typing(envelope);
       const reply = await this.#harness.ask(envelope, {
+        replyForm,
+        aside,
+        selfName: envelope.scope === 'group' ? this.#groupSelfName(envelope.chatId) : '',
         images,
         imageDescription,
         referencedImage: linkedImage ? { sameSender: linkedImage.senderId === envelope.senderId }
@@ -834,6 +912,7 @@ export class MaomaoQqConnector {
         const after = answer && current()
           && (await this.respond(envelope.receiptKey, answer, { current, limit: envelope.scope === 'group' ? 2 : 3 }).catch(() => [])).length ? answer : '';
         if (after) this.#recentReplies.set(chatKey, [...(this.#recentReplies.get(chatKey) ?? []), after].slice(-8));
+        if (after) this.#steals.delete(chatKey);
         if (chatTools.outcome() === 'sent') learning?.finish({ answer: [chatTools.transcript(), after].filter(Boolean).join('\n'), tools: chatTools.learningOutcomes() });
         return;
       }
@@ -845,8 +924,16 @@ export class MaomaoQqConnector {
       }
       const limit = test || choiceProfile || (passive && peer) ? 1 : undefined;
       const card = choices && options.length ? { profile: profile.token, options } : null;
+      // Joining in on its own, a person reads the line first and then types; a reply 2 seconds
+      // after another bot spoke reads as a script. Time spent thinking already counts.
+      if (!test && envelope.scope === 'group' && (passive || peerTurn) && this.#config.typingPace !== false) {
+        const pause = joinInPause(peerTurn?.text ?? envelope.text, textBubbles(answer, 1)[0] ?? answer) - (Date.now() - turnStart);
+        if (pause > 0) await wait(pause, undefined, { signal: this.#abort.signal }).catch(() => {});
+        if (!current()) return;
+      }
       test?.('sending');
-      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn) }).catch((error) => {
+      const sent = await this.respond(envelope.receiptKey, answer, { current, limit, card, optional: Boolean(peerTurn),
+        quote: envelope.scope === 'group' && !peerTurn && !test }).catch((error) => {
         test?.('delivery_failed');
         throw error;
       });
@@ -856,6 +943,9 @@ export class MaomaoQqConnector {
         this.#choiceThrottle.noteReply(key, Boolean(card));
         this.#recentReplies.set(key, [...(this.#recentReplies.get(key) ?? []), answer].slice(-8));
         if (this.#recentReplies.size > 200) this.#recentReplies.delete(this.#recentReplies.keys().next().value);
+        // 猫猫 just spoke here: a sticker saved meanwhile is either already mentioned (it may have
+        // collected the same one itself) or the moment has passed. Never add the fallback line after.
+        this.#steals.delete(key);
       }
       if (sent.length) learning?.finish({ answer, tools: [...(chatTools?.learningOutcomes() ?? []), ...(stickerTools?.learningOutcomes() ?? [])] });
       if (!test && !stickerTools && this.#stickers && !card && !choiceProfile && !limit
@@ -966,7 +1056,18 @@ export class MaomaoQqConnector {
     const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
     const rows = (this.#steals.get(key) ?? []).filter((row) => Date.now() - row.at < 30 * 60_000);
     this.#steals.delete(key);
-    return rows.length ? `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用你自己的说法，一句就够，可以带上打算什么时候用；图的细节大家都看见了，不用再讲。]` : '';
+    // Saying "I took that one" every time turns replies into 猫猫 talking about its own collection.
+    if (!rows.length || !this.#mayMentionSteal(key)) return '';
+    return `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用你自己的说法，一句就够，可以带上打算什么时候用；图的细节大家都看见了，不用再讲。]`;
+  }
+
+  // At most one mention of a saved sticker per chat every 30 minutes; the rest are kept quietly.
+  #mayMentionSteal(key) {
+    const last = this.#stealMentions.get(key) ?? 0;
+    if (Date.now() - last < 30 * 60_000) return false;
+    this.#stealMentions.set(key, Date.now());
+    if (this.#stealMentions.size > 200) this.#stealMentions.delete(this.#stealMentions.keys().next().value);
+    return true;
   }
 
   async #observeImage(envelope) {
@@ -1000,6 +1101,7 @@ export class MaomaoQqConnector {
         const pending = this.#steals.get(key);
         if (this.#stopped || !pending?.includes(row)) return;
         this.#steals.delete(key);
+        if (!this.#mayMentionSteal(key)) return;
         this.#runMediaJob(() => this.#enqueue(envelope, async () => {
           if (this.#stopped || Date.now() - envelope.receivedAt > 90_000) return;
           const sent = (await this.respond(envelope.receiptKey, collected.notice)).length > 0;
@@ -1077,7 +1179,10 @@ export class MaomaoQqConnector {
       if (this.#queues.get(key) === queued) this.#queues.delete(key);
     });
     this.#queues.set(key, queued);
-    void queued.catch((error) => this.#logger.error?.('QQ queued action failed:', errorLabel(error)));
+    void queued.catch((error) => {
+      this.#logger.error?.('QQ queued action failed:', errorLabel(error));
+      log('error', 'qq', '回合出错，没有回复', errorLabel(error));
+    });
     return queued;
   }
 
@@ -1130,7 +1235,7 @@ export class MaomaoQqConnector {
     return this.#imageInFlight.get(receiptKey);
   }
 
-  async respond(receiptKey, text, { current = () => true, limit, card = null, optional = false } = {}) {
+  async respond(receiptKey, text, { current = () => true, limit, card = null, optional = false, quote = false } = {}) {
     const envelope = this.#observed.get(receiptKey);
     if (!envelope || !this.#allowed(envelope) || Date.now() - envelope.receivedAt > 10 * 60_000) {
       throw new Error('QQ inbound receipt is unavailable');
@@ -1162,7 +1267,7 @@ export class MaomaoQqConnector {
             keyboard = choiceKeyboard(token, options, envelope.senderId);
           }
         }
-        const messageId = await this.#sendText(anchor, part, ticket.seq, stillAllowed, keyboard, options);
+        const messageId = await this.#sendText(anchor, part, ticket.seq, stillAllowed, keyboard, options, quote && index === 0);
         await this.#state.finish(ticket.key, messageId);
         if (!messageId && !stillAllowed()) break;
         if (!messageId) throw new Error('QQ send result did not include a message id');
@@ -1188,11 +1293,33 @@ export class MaomaoQqConnector {
     } catch (error) { this.#logger.debug?.('QQ typing notice failed', errorLabel(error)); log('debug', 'qq', '输入状态发送失败', errorLabel(error)); }
   }
 
-  async #sendText(envelope, content, seq, current = () => true, keyboard, choices) {
+  async #sendText(envelope, content, seq, current = () => true, keyboard, choices, quote = false) {
     const options = {
       target: { scope: envelope.scope, targetId: envelope.chatId, msgId: envelope.messageId },
       extra: { msg_seq: seq },
     };
+    // A plain-text group reply can quote the message it answers (QQ message_reference; Tencent's SDK
+    // adds it only to plain text). Markdown and button cards go out unquoted.
+    const quoting = quote && this.#config.quoteReplies !== false && !this.#quoteDenied.has(envelope.scope);
+    return this.#sendWith(envelope, content, options, current, keyboard, choices, quoting);
+  }
+
+  // Plain text with a quote; if QQ refuses it but takes the same text unquoted, quoting stays off here.
+  async #sendQuoted(envelope, request, current) {
+    try {
+      return await this.#bot.send({ ...request, messageReference: { message_id: envelope.messageId } });
+    } catch (error) {
+      if (!(error instanceof ApiError) || !current()) throw error;
+      const result = await this.#bot.send(request);
+      const code = Number(error.bizCode ?? 0);
+      this.#quoteDenied.add(envelope.scope);
+      log('warn', 'qq', 'QQ 不接受引用回复，改为不引用', { code, scope: envelope.scope });
+      apiError('qq', code, 'QQ 拒绝了引用回复，改发不带引用的消息');
+      return result;
+    }
+  }
+
+  async #sendWith(envelope, content, options, current, keyboard, choices, quoting) {
     if (!current()) return '';
     this.#shadow?.noteOutbound(envelope, content);
     const plain = plainChatMarkdown(content);
@@ -1214,7 +1341,8 @@ export class MaomaoQqConnector {
         if (!current()) return '';
       }
     }
-    const result = await this.#bot.send({ ...options, content: plain + choiceText, msgType: MsgType.TEXT });
+    const textRequest = { ...options, content: plain + choiceText, msgType: MsgType.TEXT };
+    const result = quoting ? await this.#sendQuoted(envelope, textRequest, current) : await this.#bot.send(textRequest);
     return typeof result?.id === 'string' ? result.id : '';
   }
 }

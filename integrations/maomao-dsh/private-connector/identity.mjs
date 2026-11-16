@@ -72,6 +72,35 @@ export function telegramInbound(accountId, update, now = Date.now(), username = 
     ...(group ? { scope: 'group', chatTitle: text(message.chat.title).slice(0, 60) } : {}) });
 }
 
+// WeChat ClawBot (iLink) private messages. IDs look like "xxxx@im.wechat"; groups are not offered.
+const weixinId = (value) => typeof value === 'string' && /^[\w.@-]{1,128}$/.test(value) ? value : '';
+export function weixinInbound(accountId, message, now = Date.now()) {
+  if (!message || message.message_type !== 1 || message.group_id) return null;
+  const senderId = weixinId(message.from_user_id);
+  const messageId = /^[\w-]{1,64}$/.test(String(message.message_id ?? '')) ? String(message.message_id)
+    : Number.isSafeInteger(message.seq) ? `seq-${message.seq}` : '';
+  const sentAt = Number(message.create_time_ms) || now;
+  if (!senderId || !messageId || !fresh(sentAt, now)) return null;
+  const items = Array.isArray(message.item_list) ? message.item_list : [];
+  const parts = [];
+  let image = null;
+  for (const item of items) {
+    if (item?.type === 1 && typeof item.text_item?.text === 'string') parts.push(item.text_item.text);
+    else if (item?.type === 3) parts.push(item.voice_item?.text ? `[语音] ${item.voice_item.text}` : '[语音，没有转写]');
+    else if (item?.type === 2 && !image && (item.image_item?.media?.encrypt_query_param || item.image_item?.media?.full_url)) {
+      image = { ...item.image_item.media, ...(item.image_item.aeskey ? { aeskey: item.image_item.aeskey } : {}) };
+    } else if (item?.type === 4) parts.push(`[文件：${text(item.file_item?.file_name).slice(0, 80) || '未命名'}]`);
+    else if (item?.type === 5) parts.push('[视频]');
+    const quoted = item?.ref_msg?.message_item?.text_item?.text ?? item?.ref_msg?.title;
+    if (typeof quoted === 'string' && quoted.trim()) parts.unshift(`[引用] ${text(quoted).slice(0, 300)}`);
+  }
+  const content = text(parts.join('\n'));
+  if (!content && !image) return null;
+  return Object.freeze({ platform: 'weixin', accountId, senderId, chatId: senderId, messageId, text: content,
+    receivedAt: now, sentAt, media: image ? Object.freeze({ id: messageId, type: 'image', weixin: Object.freeze(image) }) : null,
+    stickerLabel: '' });
+}
+
 export class PrivateBindings {
   #owners = new Map();
   #senders = new Map();
@@ -86,9 +115,11 @@ export class PrivateBindings {
       }
       for (const endpoint of entry.endpoints) {
         const { platform, accountId, senderId, chatId } = endpoint ?? {};
-        if (!['feishu', 'telegram'].includes(platform) || ![accountId, senderId, chatId].every(id)
+        if (!['feishu', 'telegram', 'weixin'].includes(platform)
+          || ![accountId, senderId, chatId].every(platform === 'weixin' ? weixinId : id)
           || (platform === 'telegram' && (!/^\d+$/.test(accountId) || !/^\d+$/.test(senderId) || senderId !== chatId))
-          || (platform === 'feishu' && (!accountId.startsWith('cli_') || !senderId.startsWith('ou_') || !chatId.startsWith('oc_')))) {
+          || (platform === 'feishu' && (!accountId.startsWith('cli_') || !senderId.startsWith('ou_') || !chatId.startsWith('oc_')))
+          || (platform === 'weixin' && senderId !== chatId)) {
           throw new TypeError('private_binding_endpoint_invalid');
         }
         const destination = digest([platform, accountId, chatId]);

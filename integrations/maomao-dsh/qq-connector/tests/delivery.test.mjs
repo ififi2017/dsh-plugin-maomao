@@ -12,7 +12,7 @@ const inbound = (id, content = '猫猫，你觉得呢？') => ({
   senderId: 'member-a', messageId: id, content, attachments: [],
 });
 
-async function withConnector(delivery, judge, harness, run, ordinary) {
+async function withConnector(delivery, judge, harness, run, ordinary, extra = {}) {
   const root = await mkdtemp(join(tmpdir(), 'maomao-qq-delivery-'));
   const old = [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT];
   process.env.MAOMAO_QQ_APP_ID = 'test-app';
@@ -29,9 +29,9 @@ async function withConnector(delivery, judge, harness, run, ordinary) {
     } };
   const connector = new MaomaoQqConnector(
     { sessionController: {}, emit() {}, logger: { warn() {}, error() {} } },
-    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [],
+    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [], typingPace: false,
       shadow: { enabled: true, path: join(root, 'shadow.jsonl'), debounceMs: 1,
-        semantic: { enabled: true }, delivery }, ordinary: { enabled: Boolean(ordinary) } },
+        semantic: { enabled: true }, delivery }, ordinary: { enabled: Boolean(ordinary) }, ...extra },
     { botFactory: () => bot, shadowJudge: judge, harness, ordinary });
   try {
     await connector.start();
@@ -262,4 +262,121 @@ test('semantic stop cancels only this exchange while a stop command remains paus
       else await until(() => sends.length === before + 1);
     });
   }
+});
+
+test('an approved unprompted group reply that names a reply form is still sent, with that form', { timeout: 4_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope, options) { asked.push(options); return '中'; } };
+  await withConnector({ enabled: true, groupAllowlist: ['test-group'] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('with-form'));
+      await firstSend;
+      assert.equal(sends[0].target.msgId, 'with-form');
+      assert.equal(asked[0].replyForm, 'brief');
+      assert.equal(asked[0].passive, true);
+    });
+});
+
+test('the panel 主动接话 switch turns unprompted replies on for a group outside the config lists, and off again', { timeout: 4_000 }, async () => {
+  const harness = { async ask() { return '中'; } };
+  await withConnector({ enabled: false, groupAllowlist: [] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('before'));
+      await delay(30);
+      assert.equal(sends.length, 0, 'not listed and no switch: only @ gets a reply');
+      const [group] = connector.peerGroups();
+      assert.equal(group.passive, false);
+      assert.equal((await connector.savePeerGroup({ ...group, passive: true })).status, 'saved');
+      assert.equal(connector.peerGroups()[0].passive, true);
+      await connector.accept(inbound('after'));
+      await firstSend;
+      assert.equal(sends[0].target.msgId, 'after');
+      await connector.savePeerGroup({ ...connector.peerGroups()[0], passive: false });
+      await connector.accept(inbound('off-again'));
+      await delay(30);
+      assert.equal(sends.length, 1);
+    });
+});
+
+test('猫猫 learns its own group display name from the panel and hears it in group turns', { timeout: 10_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope, options) { asked.push(options); return '中'; } };
+  await withConnector({ enabled: true, groupAllowlist: ['test-group'] },
+    async () => ({ reply: true, form: 'brief' }), harness, async (connector, sends, firstSend) => {
+      await connector.accept(inbound('first'));
+      await firstSend;
+      assert.equal(asked[0].selfName, '');
+      const [group] = connector.peerGroups();
+      assert.equal((await connector.savePeerGroup({ ...group, selfName: ' 猫猫 2 号 ' })).status, 'saved');
+      assert.equal(connector.peerGroups()[0].selfName, '猫猫 2 号');
+      assert.equal((await connector.savePeerGroup({ ...group, selfName: '<b>' })).status, 'invalid');
+      await connector.accept(inbound('second'));
+      // A follow-up right after 猫猫 spoke is judged after a short gap (about 4 s).
+      const end = Date.now() + 7000;
+      while (asked.length < 2 && Date.now() < end) await delay(50);
+      assert.equal(asked[1]?.selfName, '猫猫 2 号');
+    });
+});
+
+test('messages sent in a quick burst are answered once, together, after the sender pauses', { timeout: 6_000 }, async () => {
+  const asked = [];
+  const harness = { async ask(envelope) { asked.push(envelope.text); return '中'; } };
+  const at = (id, content) => ({ ...inbound(id, content), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+  await withConnector({ enabled: false, groupAllowlist: [] }, async () => ({ reply: false }), harness,
+    async (connector, sends, firstSend) => {
+      await connector.accept(at('one', '我跟你说'));
+      await delay(150);
+      await connector.accept(at('two', '今天老板又加班'));
+      await delay(150);
+      assert.equal(sends.length, 0, 'still waiting while the person is typing');
+      await connector.accept(at('three', '烦死了'));
+      await firstSend;
+      assert.deepEqual(asked, ['我跟你说\n今天老板又加班\n烦死了']);
+      assert.equal(sends[0].target.msgId, 'three', 'the reply is anchored on the last message');
+    }, undefined, { replyQuietMs: 400 });
+});
+
+async function quoteConnector(sendImpl, run) {
+  const { ApiError } = await import('@tencent-connect/qqbot-nodejs');
+  const root = await mkdtemp(join(tmpdir(), 'maomao-qq-quote-'));
+  const old = [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT];
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-app', MAOMAO_QQ_APP_SECRET: 'test-secret', MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return sendImpl(request, ApiError, sends.length); } };
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: { warn() {}, error() {} } },
+    { statePath: join(root, 'state.json'), groupAllowlist: ['test-group'], dmAllowlist: [], typingPace: false },
+    { botFactory: () => bot, harness: { async ask() { return '收到<|bubble|>稍等我看看'; } } });
+  try {
+    await connector.start();
+    await run(connector, sends);
+  } finally {
+    await connector.stop();
+    [process.env.MAOMAO_QQ_APP_ID, process.env.MAOMAO_QQ_APP_SECRET, process.env.MAOMAO_QQ_CONNECT] = old;
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('a group reply quotes the message it answers on its first bubble', async () => {
+  await quoteConnector(() => ({ id: 'sent' }), async (connector, sends) => {
+    await connector.accept({ ...inbound('ask-1', '你看这个'), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+    const end = Date.now() + 2000;
+    while (sends.length < 2 && Date.now() < end) await delay(20);
+    assert.deepEqual(sends[0].messageReference, { message_id: 'ask-1' });
+    assert.equal(sends[1].messageReference, undefined, 'later bubbles are not quoted again');
+  });
+});
+
+test('when QQ refuses a quote, the same text goes out once unquoted and later replies stop quoting', async () => {
+  await quoteConnector((request, ApiError) => {
+    if (request.messageReference) throw new ApiError('reference not supported', 400, '/v2/groups/x/messages', 40054001);
+    return { id: 'sent' };
+  }, async (connector, sends) => {
+    await connector.accept({ ...inbound('ask-2', '你看这个'), rawEventType: 'GROUP_AT_MESSAGE_CREATE' });
+    const end = Date.now() + 2000;
+    while (sends.length < 3 && Date.now() < end) await delay(20);
+    assert.deepEqual(sends.map((s) => [s.content, Boolean(s.messageReference)]),
+      [['收到', true], ['收到', false], ['稍等我看看', false]]);
+  });
 });

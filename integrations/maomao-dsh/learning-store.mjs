@@ -27,6 +27,7 @@ export class LearningStore {
       CREATE TABLE IF NOT EXISTS evidence_origins(id TEXT PRIMARY KEY, kind TEXT NOT NULL, links TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY, at INTEGER NOT NULL, outcome TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS entry_subject ON entries(subject,status);
+      CREATE TABLE IF NOT EXISTS people(subject TEXT PRIMARY KEY, name TEXT NOT NULL, owner INTEGER NOT NULL, seen INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS vectors(id TEXT PRIMARY KEY, model TEXT NOT NULL, signature TEXT NOT NULL, vector TEXT NOT NULL);
     `));
     chmodSync(this.path, 0o600);
@@ -43,6 +44,15 @@ export class LearningStore {
       return true;
     });
   }
+  // Who a subject fingerprint is, for the panel: the owner, a name the platform sent, or nothing.
+  notePerson(subject, { name = '', owner = false } = {}) {
+    if (!bounded(subject, 100)) return;
+    const clean = typeof name === 'string' ? name.replace(/[\x00-\x1f]/g, '').trim().slice(0, 40) : '';
+    this.db(db => db.prepare(`INSERT INTO people VALUES (?,?,?,?) ON CONFLICT(subject) DO UPDATE SET
+      name=CASE WHEN excluded.name<>'' THEN excluded.name ELSE people.name END, owner=max(people.owner,excluded.owner), seen=excluded.seen`)
+      .run(subject, clean, owner ? 1 : 0, this.clock()));
+  }
+  people() { return Object.fromEntries(this.db(db => db.prepare('SELECT subject,name,owner FROM people').all()).map(r => [r.subject, { name: r.name, owner: Boolean(r.owner) }])); }
   evidence(subject) { return this.db(db => db.prepare("SELECT e.*,coalesce(o.kind,'user') AS origin,o.links FROM evidence e LEFT JOIN evidence_origins o ON o.id=e.id WHERE subject=? ORDER BY at DESC LIMIT 8").all(subject)); }
   list({ query = '', kind = '', page = 0, active = false } = {}) {
     const now = this.clock();

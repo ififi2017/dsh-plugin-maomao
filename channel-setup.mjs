@@ -3,14 +3,15 @@ import QRCode from 'qrcode';
 
 const privateId = 'maomao-dsh-private';
 const qqId = 'maomao-dsh-qq';
-const routes = { feishu: privateId, telegram: privateId, qq: qqId };
+const routes = { feishu: privateId, telegram: privateId, weixin: privateId, qq: qqId };
 const duration = 12 * 60_000;
 const secretPattern = /^[A-Za-z0-9_=-]{8,512}$/;
 const terminal = new Set(['connected', 'disconnected', 'verified', 'failed', 'cancelled']);
 const knownFailures = new Set(['credentials_rejected', 'telegram_http_409', 'telegram_webhook_or_status_unknown',
   'telegram_management_disabled', 'telegram_wrong_bot', 'feishu_token_unavailable', 'wrong_edition',
   'setup_missing', 'managed_credentials_required', 'configuration_unavailable', 'configuration_rejected',
-  'invalid_qr', 'expired_token', 'access_denied']);
+  'invalid_qr', 'expired_token', 'access_denied', 'weixin_already_bound', 'weixin_verify_code_required',
+  'weixin_session_expired']);
 const failure = (code) => Object.assign(new Error(code), { code });
 const referencePrefix = (platform) => `MAOMAO_PANEL_${platform.toUpperCase()}_`;
 
@@ -22,6 +23,7 @@ function validateAuthorizationUrl(platform, raw) {
   const allowed = platform === 'feishu'
     ? ['open.feishu.cn', 'open.larksuite.com'].includes(url.hostname) && ['/page/launcher', '/page/cli'].includes(url.pathname)
     : platform === 'telegram' ? url.hostname === 't.me' && /^\/(?:newbot\/)?[a-z0-9_/]{5,98}$/i.test(url.pathname)
+      : platform === 'weixin' ? /(^|\.)qq\.com$/.test(url.hostname)
       : url.hostname === 'q.qq.com' && url.pathname === '/qqbot/openclaw/connect.html';
   if (!allowed) throw failure('invalid_qr');
   return url.href;
@@ -172,9 +174,15 @@ export class ChannelSetup {
         const value = await setup.provisionQQ({ signal, onQr });
         return { accountId: value.appId, secret: value.secret };
       }
+      if (platform === 'weixin') {
+        const value = await setup.provisionWeixin({ signal, onQr });
+        return { accountId: value.accountId, secret: value.secret };
+      }
       const value = await setup.provisionTelegram({ token: secret, mode: 'managed', signal, onQr });
       return { accountId: String(value.bot.id), secret: value.token };
     }
+    // WeChat ClawBot has no app secret to paste: it connects only by scanning.
+    if (platform === 'weixin') throw failure('credentials_rejected');
     if (typeof secret !== 'string' || secret.length > 512) throw failure('credentials_rejected');
     if (platform === 'telegram') {
       const id = /^(\d{1,20}):[A-Za-z0-9_-]{8,480}$/.exec(secret)?.[1];
@@ -194,6 +202,7 @@ export class ChannelSetup {
     const bound = AbortSignal.any([signal, AbortSignal.timeout(30_000)]);
     if (platform === 'feishu') return setup.verifyFeishu({ appId: accountId, secret, brand, signal: bound });
     if (platform === 'telegram') return setup.verifyTelegram({ token: secret, signal: bound });
+    if (platform === 'weixin') return setup.verifyWeixin({ accountId, secret, signal: bound });
     return setup.verifyQQ({ appId: accountId, secret, signal: bound });
   }
 
@@ -213,7 +222,8 @@ export class ChannelSetup {
       }
       return next;
     }
-    const updated = { ...config, [platform]: next, enabled: enabled || config[platform === 'feishu' ? 'telegram' : 'feishu']?.enabled === true };
+    const updated = { ...config, [platform]: next,
+      enabled: enabled || ['feishu', 'telegram', 'weixin'].some((other) => other !== platform && config[other]?.enabled === true) };
     if ((!enabled || replacement) && config.sharing?.destination?.platform === platform) {
       updated.sharing = { ...config.sharing, enabled: false };
     }

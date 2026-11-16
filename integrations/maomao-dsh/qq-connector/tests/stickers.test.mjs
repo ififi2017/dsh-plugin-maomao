@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { normalizeInbound, recentImageFor } from '../inbound.mjs';
+import { normalizeInbound, recentImageFor, recentImagesFrom } from '../inbound.mjs';
 import { MaomaoQqConnector } from '../index.mjs';
 import { OrdinaryBridge } from '../ordinary.mjs';
 import { StickerIntelligence } from '../stickers.mjs';
@@ -137,6 +137,121 @@ test('in sticker-tool mode a clear sticker is kept on first sight and announced 
     assert.equal(sends.length, 1);
     assert.match(sends[0].content, /偷走啦.*憋笑脸/);
     assert.equal(sends[0].target.msgId, 'first');
+  } finally {
+    await connector.stop();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a message of only a QQ store sticker is not empty: it reads as a QQ face, named when the sticker says so', () => {
+  const store = (ext) => normalizeInbound(message('store', { content: '',
+    raw: { content: `<faceType=3,faceId="ec7c4b1b0d3cd7b5",ext="${ext}">` } }), 0, 'bot-a');
+  assert.equal(store('opaque').text, '[QQ 表情]');
+  assert.equal(store(Buffer.from(JSON.stringify({ text: '[狗头保命]' })).toString('base64')).text, '[QQ 表情：狗头保命]');
+  const known = normalizeInbound(message('face', { content: '', raw: { content: '[<face,id=178/>]' } }), 0, 'bot-a');
+  assert.equal(known.text, '[QQ 表情：斜眼笑]');
+});
+
+test('a picture rides along with a follow-up question once, and plain remarks do not drag old pictures or stickers in', () => {
+  const at = (id, seconds, options = {}) => normalizeInbound(message(id, options), 1_000_000 + seconds * 1000, 'bot-a');
+  const screenshot = at('shot', 0, { attachments });
+  const sticker = at('sticker', 50, { attachments, content: '【表情: 未知表情】' });
+  const receipts = [screenshot, sticker];
+  // "Picture, then 分析下" picks up the screenshot.
+  assert.deepEqual(recentImagesFrom(at('ask', 20, { content: '出来分析下' }), receipts).map((r) => r.messageId), ['shot']);
+  // An unrelated remark soon after an unanswered picture still gets it; a minute later it does not.
+  assert.deepEqual(recentImagesFrom(at('remark', 30, { content: '你 tm' }), [screenshot]).map((r) => r.messageId), ['shot']);
+  assert.deepEqual(recentImagesFrom(at('later', 70, { content: '你 tm' }), [screenshot]), []);
+  // A sticker is not "the picture you mean" unless the line points at it.
+  assert.deepEqual(recentImagesFrom(at('next', 55, { content: '怎么又扎心' }), [sticker]), []);
+  assert.deepEqual(recentImagesFrom(at('about', 55, { content: '这张啥意思' }), [sticker]).map((r) => r.messageId), ['sticker']);
+  // Once a turn has looked at a picture it is not attached again.
+  assert.deepEqual(recentImagesFrom(at('again', 25, { content: '分析下' }), receipts, 3, 120_000, { shown: new Set([screenshot.receiptKey]) }), []);
+});
+
+test('a screenshot of a page, balance or dashboard is never kept as a sticker, whatever the vision model says', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-screenshot-'));
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  try {
+    const envelope = normalizeInbound(message('shot', { attachments }), Date.now(), 'bot-a');
+    const remember = (result) => ordinary.media('remember_image', envelope, { data: png, collect: true, first_sight: true, result });
+    const kept = await remember({ description: 'Google AdSense 网页后台的收入卡片截图，余额 0 美元', text: '估算收入 US$0.10',
+      category: '无语', is_meme: true, confidence: 0.95, personal_or_sensitive: false, steal_reason: '收入太少时自嘲' });
+    assert.equal(kept.notice, undefined, 'the AdSense screenshot is not kept');
+    const sticker = await remember(description);
+    assert.match(sticker.notice ?? '', /偷走啦/, 'a real sticker still is');
+  } finally {
+    await ordinary.stop?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('when 猫猫 replies in the chat after a background save, the fallback line is not sent as well', { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-steal-once-'));
+  const env = { ...Object.fromEntries(['MAOMAO_QQ_APP_ID', 'MAOMAO_QQ_APP_SECRET', 'MAOMAO_QQ_CONNECT']
+    .map((key) => [key, process.env[key]])) };
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
+    MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return { id: `sent-${sends.length}` }; } };
+  const learning = { settings: { stickers: true, collectStickers: true } };
+  // The reply takes a moment, so the background save lands first, as it did in the real chat.
+  const harness = { async ask() { await new Promise((resolve) => setTimeout(resolve, 2000)); return '图俺顺手收下了。'; } };
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: console,
+    get: (name) => name === 'maomaoLearning' ? learning : undefined },
+  { groupAllowlist: ['group-a'], statePath: join(root, 'state.json'), stickers: { enabled: true }, typingPace: false },
+  { botFactory: () => bot, ordinary, stickers: { async describe() { return description; } }, stealNoticeDelayMs: 2500, harness });
+  connector.loadImages = async (receiptKey) => receiptKey.endsWith(':first') ? [picture] : [];
+  try {
+    await connector.start();
+    await connector.accept(message('first', { attachments, rawEventType: 'GROUP_AT_MESSAGE_CREATE' }));
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    assert.deepEqual(sends.map((s) => s.content), ['图俺顺手收下了。']);
+  } finally {
+    await connector.stop();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('saved stickers are mentioned at most once per chat every 30 minutes; the rest are kept quietly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-steal-quiet-'));
+  const env = { ...Object.fromEntries(['MAOMAO_QQ_APP_ID', 'MAOMAO_QQ_APP_SECRET', 'MAOMAO_QQ_CONNECT']
+    .map((key) => [key, process.env[key]])) };
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
+    MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return { id: `sent-${sends.length}` }; } };
+  const learning = { settings: { stickers: true, collectStickers: true } };
+  const other = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex').toString('base64');
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: console,
+    get: (name) => name === 'maomaoLearning' ? learning : undefined },
+  { groupAllowlist: ['group-a'], statePath: join(root, 'state.json'), stickers: { enabled: true } },
+  { botFactory: () => bot, ordinary, stickers: { async describe() { return description; } }, stealNoticeDelayMs: 60,
+    harness: { async ask() { return ''; } } });
+  connector.loadImages = async (receiptKey) => receiptKey.endsWith(':first') ? [picture]
+    : receiptKey.endsWith(':second') ? [{ ...picture, data: other }] : [];
+  try {
+    await connector.start();
+    await connector.accept(message('first', { attachments }));
+    const end = Date.now() + 3000;
+    while (!sends.length && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 15));
+    await connector.accept(message('second', { attachments }));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(sends.filter((s) => /偷走啦/.test(s.content)).length, 1);
   } finally {
     await connector.stop();
     for (const [key, value] of Object.entries(env)) {

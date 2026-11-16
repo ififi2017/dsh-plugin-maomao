@@ -142,3 +142,46 @@ test('bot-to-bot banter stops after two rounds for one person, and uses the full
     assert.equal(await banter('c5'), null);
   } finally { await shadow.stop(); }
 });
+
+test('a single person egging both bots on cannot keep the banter going: at most 3 replies to the bot in ten minutes', async () => {
+  let now = 1_000_000;
+  const shadow = new PassiveShadow(null, { clock: () => now, debounceMs: 1, judge: async () => ({ reply: true, form: 'brief' }) });
+  const peer = { maxRounds: 2 };
+  // Each human line arrives at the current test time, so the five-minute reply window stays open.
+  const human = (id) => shadow.observe(normalizeInbound({ kind: 'group', rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    groupOpenid: 'group-a', senderId: 'member-a', messageId: id, content: '你俩谁是老大', attachments: [] }, now, 'app-a'));
+  const banter = async (id) => {
+    now += 5_000;
+    const turn = await shadow.notePeer('app-a', 'group-a', peer, { messageId: id, senderId: 'other-bot', content: `接梗 ${id}` }, { enabled: () => true });
+    turn?.release();
+    return turn;
+  };
+  try {
+    // Each new human line resets the per-exchange rounds, but the burst cap still holds.
+    await human('h1'); assert.ok(await banter('a1')); assert.ok(await banter('a2'));
+    now += 5_000; await human('h2'); assert.ok(await banter('a3'));
+    assert.equal(await banter('a4'), null, 'fourth reply to the bot within ten minutes is skipped');
+    now += 11 * 60_000; await human('h3');
+    assert.ok(await banter('a5'), 'the burst window has passed');
+  } finally { await shadow.stop(); }
+});
+
+test('after @-mentioning another member, the same person\'s next line without @ is judged as part of that talk', async () => {
+  let now = 1_000_000;
+  const payloads = [];
+  const shadow = new PassiveShadow(null, { clock: () => now, debounceMs: 1, judge: async (payload) => { payloads.push(payload); return { reply: false }; } });
+  const at = (id, content, extra = {}) => normalizeInbound({ kind: 'group', rawEventType: 'GROUP_MESSAGE_CREATE', groupOpenid: 'group-a',
+    senderId: 'member-a', messageId: id, content, attachments: [], ...extra }, now, 'app-a');
+  try {
+    await shadow.observe(at('aside', '<@friend123> 笑死，我公司的 jc 给我打了个企微电话', { mentions: [{ member_openid: 'friend123', bot: false }] }));
+    now += 5_000;
+    await shadow.observe(at('next', '我还以为是你打的'));
+    const last = payloads.at(-1);
+    assert.equal(last.mode, 'group_interjection');
+    assert.equal(last.continues_talk_with_other, true);
+    assert.match(JSON.stringify(last.recent_messages), /@群友d123 笑死/, 'the earlier @ is shown as a member, not a raw id');
+    now += 3 * 60_000;
+    await shadow.observe(at('later', '你们在聊啥'));
+    assert.equal(payloads.at(-1).continues_talk_with_other, undefined, 'minutes later it is a fresh line');
+  } finally { await shadow.stop(); }
+});
