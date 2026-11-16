@@ -223,3 +223,41 @@ test('when 猫猫 replies in the chat after a background save, the fallback line
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('saved stickers are mentioned at most once per chat every 30 minutes; the rest are kept quietly', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maomao-steal-quiet-'));
+  const env = { ...Object.fromEntries(['MAOMAO_QQ_APP_ID', 'MAOMAO_QQ_APP_SECRET', 'MAOMAO_QQ_CONNECT']
+    .map((key) => [key, process.env[key]])) };
+  Object.assign(process.env, { MAOMAO_QQ_APP_ID: 'test-bot', MAOMAO_QQ_APP_SECRET: 'test-secret',
+    MAOMAO_QQ_CONNECT: 'I_STOPPED_HERMES_QQ' });
+  const ordinary = new OrdinaryBridge({ root: join(root, 'memory'), stickerPack: root });
+  const sends = [];
+  let finishRun;
+  const bot = { use() {}, on() {}, start() { return new Promise((resolve) => { finishRun = resolve; }); },
+    stop() { finishRun?.(); }, async send(request) { sends.push(request); return { id: `sent-${sends.length}` }; } };
+  const learning = { settings: { stickers: true, collectStickers: true } };
+  const other = Buffer.from('89504e470d0a1a0a0000000d4948445200000001000000010806000000', 'hex').toString('base64');
+  const connector = new MaomaoQqConnector({ sessionController: {}, emit() {}, logger: console,
+    get: (name) => name === 'maomaoLearning' ? learning : undefined },
+  { groupAllowlist: ['group-a'], statePath: join(root, 'state.json'), stickers: { enabled: true } },
+  { botFactory: () => bot, ordinary, stickers: { async describe() { return description; } }, stealNoticeDelayMs: 60,
+    harness: { async ask() { return ''; } } });
+  connector.loadImages = async (receiptKey) => receiptKey.endsWith(':first') ? [picture]
+    : receiptKey.endsWith(':second') ? [{ ...picture, data: other }] : [];
+  try {
+    await connector.start();
+    await connector.accept(message('first', { attachments }));
+    const end = Date.now() + 3000;
+    while (!sends.length && Date.now() < end) await new Promise((resolve) => setTimeout(resolve, 15));
+    await connector.accept(message('second', { attachments }));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(sends.filter((s) => /偷走啦/.test(s.content)).length, 1);
+  } finally {
+    await connector.stop();
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});

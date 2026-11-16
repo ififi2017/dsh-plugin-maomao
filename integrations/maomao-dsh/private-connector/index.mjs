@@ -28,6 +28,8 @@ import { chatWorkspace } from '../chat-workspace.mjs';
 import { TimeTags } from '../time-tags.mjs';
 import { cleanReply } from '../reply-cleanup.mjs';
 import { MoodBook } from '../mood.mjs';
+import { PICTURE_REPLY } from '../personas.mjs';
+import { refersToImage } from '../qq-connector/inbound.mjs';
 
 export const name = 'maomao-dsh-private';
 export const inject = ['sessionController'];
@@ -1150,7 +1152,8 @@ export class PrivateConnector {
       stickerTools?.guidance, learning?.guidance].filter(Boolean).join('\n\n');
     // This turn's reference material: in the system section for this turn only, not in history.
     for (const event of messages) this.#mood.note(route, event.text, event.receivedAt);
-    const reference = turnReference([this.#mood.memo(route), this.#mood.repeatNudge(route), styleNudge(this.#recentReplies.get(route) ?? []), context,
+    const pictureOnly = messages.some((event) => event.media || event.image) && !messages.some((event) => refersToImage(event.text));
+    const reference = turnReference([pictureOnly ? PICTURE_REPLY : '', this.#mood.memo(route), this.#mood.repeatNudge(route), styleNudge(this.#recentReplies.get(route) ?? []), context,
       learning ? learning.context({ guidance: false }) : '', stickerTools ? stickerTools.context({ guidance: false }) : '',
       previousSpeech ? `[同一会话上一条已发送语音台词，仅作改写参考] ${JSON.stringify(previousSpeech)}` : '',
       messages.some((event, index) => event.media && !(useChatVision && event.image?.mediaType !== 'image/gif') && !inspections[index] && !event.imagePermissionMissing)

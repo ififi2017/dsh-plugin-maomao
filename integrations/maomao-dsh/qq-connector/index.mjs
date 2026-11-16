@@ -77,6 +77,7 @@ export class MaomaoQqConnector {
   #steals = new Map();
   #stealNoticeDelayMs = 15_000;
   #bursts = new Map();
+  #stealMentions = new Map();
   #shownImages = new Set();
   #dshHome = '';
   #chatFolder;
@@ -1052,7 +1053,18 @@ export class MaomaoQqConnector {
     const key = `${envelope.botId}:${envelope.scope}:${envelope.chatId}`;
     const rows = (this.#steals.get(key) ?? []).filter((row) => Date.now() - row.at < 30 * 60_000);
     this.#steals.delete(key);
-    return rows.length ? `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用你自己的说法，一句就够，可以带上打算什么时候用；图的细节大家都看见了，不用再讲。]` : '';
+    // Saying "I took that one" every time turns replies into 猫猫 talking about its own collection.
+    if (!rows.length || !this.#mayMentionSteal(key)) return '';
+    return `[你刚把这里刚出现的表情偷偷存进了自己的表情包：${JSON.stringify(rows.map(({ description, reason }) => ({ description, reason })))}。这一轮顺口告诉大家一声，用你自己的说法，一句就够，可以带上打算什么时候用；图的细节大家都看见了，不用再讲。]`;
+  }
+
+  // At most one mention of a saved sticker per chat every 30 minutes; the rest are kept quietly.
+  #mayMentionSteal(key) {
+    const last = this.#stealMentions.get(key) ?? 0;
+    if (Date.now() - last < 30 * 60_000) return false;
+    this.#stealMentions.set(key, Date.now());
+    if (this.#stealMentions.size > 200) this.#stealMentions.delete(this.#stealMentions.keys().next().value);
+    return true;
   }
 
   async #observeImage(envelope) {
@@ -1086,6 +1098,7 @@ export class MaomaoQqConnector {
         const pending = this.#steals.get(key);
         if (this.#stopped || !pending?.includes(row)) return;
         this.#steals.delete(key);
+        if (!this.#mayMentionSteal(key)) return;
         this.#runMediaJob(() => this.#enqueue(envelope, async () => {
           if (this.#stopped || Date.now() - envelope.receivedAt > 90_000) return;
           const sent = (await this.respond(envelope.receiptKey, collected.notice)).length > 0;

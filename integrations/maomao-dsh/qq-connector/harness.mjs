@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { TimeTags } from '../time-tags.mjs';
 import { MoodBook } from '../mood.mjs';
 import { cleanReply } from '../reply-cleanup.mjs';
-import { mountChannelPersona, turnReference } from '../personas.mjs';
+import { mountChannelPersona, turnReference, PICTURE_REPLY } from '../personas.mjs';
+import { refersToImage } from './inbound.mjs';
 import { choiceGuidance } from '../choices.mjs';
 import { chatToolGuidance } from '../chat-tools.mjs';
 import { styleNudge } from '../humanlike.mjs';
@@ -136,7 +137,9 @@ export class HarnessConversation {
     const moodLine = this.#mood.memo(moodKey, { group });
     const toneLine = group && !peerTurn && !owner ? this.#mood.familiarity(moodKey, envelope.senderId) : '';
     const nameLine = group && selfName ? `[你在这个群里显示的名字是「${selfName}」，群友这么叫你就是在叫你；群里别的机器人哪怕也叫猫猫，也是别人。]` : '';
-    const reference = turnReference([nameLine, moodLine, toneLine, this.#mood.repeatNudge(moodKey), passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
+    // A picture or sticker sent to 猫猫 is a message to answer, not an image to narrate back.
+    const pictureLine = !peerTurn && (images.length || imageDescription) && !refersToImage(text) ? PICTURE_REPLY : '';
+    const reference = turnReference([nameLine, pictureLine, moodLine, toneLine, this.#mood.repeatNudge(moodKey), passiveHint, peerTarget, styleNudge(ownLines), ownerHint, previousSpeech, stickerTools?.context({ guidance: false }),
       ambientText, memoryText, learning?.context({ guidance: false }),
       imageExpected && !images.length && !imageDescription
         ? '[这次你没看清对方发的图。像人没看清那样随口带过一句、请对方再发，用你自己的说法；你说话从来不带后台、技术或系统那一套。]' : unseenImages]);

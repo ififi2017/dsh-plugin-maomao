@@ -171,7 +171,7 @@ export function textBubbles(text, maximum = 4) {
 // People often post a few pictures and then ask about them in a separate message
 // ("分析一下是谁全责"). Pick that sender's own recent pictures, oldest first.
 // Words that point at a picture or ask about it ("分析下", "这是啥", "评价一下").
-const ASKS_ABOUT_IMAGE = /分析|评价|点评|看看|看下|看一下|瞅瞅|这是|这啥|啥意思|什么意思|怎么样|对吗|对不对|图里|图上|截图|识别/;
+const ASKS_ABOUT_IMAGE = /分析|评价|点评|锐评|銳評|看看|看下|看一下|瞅瞅|这是|这啥|啥意思|什么意思|怎么样|对吗|对不对|图里|图上|截图|识别/;
 export const refersToImage = (text) => IMAGE_REFERENCE.test(text ?? '') || ASKS_ABOUT_IMAGE.test(text ?? '');
 // QQ marks a posted sticker with 【表情…】; a plain photo or screenshot arrives with no text at all.
 const STICKER_MARK = /【表情[^】]*】|\[QQ 表情[^\]]*\]/;
